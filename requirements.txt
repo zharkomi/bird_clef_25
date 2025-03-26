@@ -5,3 +5,5 @@ librosa~=0.11.0
 PyWavelets~=1.8.0
 soundfile~=0.13.1
 pydub~=0.25.1
+scipy~=1.12.0
+PyEMD~=1.0.0

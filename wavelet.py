@@ -1,11 +1,7 @@
-import os
-
 import matplotlib.pyplot as plt
-import numpy as np
-import pywt
-from PyEMD import EMD as PyEMD  # Import the EMD implementation
 
 from audio import parse_file, save_audio
+from PyEMD import EMD as PyEMD  # Import the EMD implementation
 
 
 def remove_noise_layers(coeffs, n_layers_to_remove=1, threshold_method='soft', threshold_factor=1.0):
@@ -737,7 +733,7 @@ def normalize_signal_lengths(y, denoised_signal, noise_signal):
 
 
 def wavelet_denoise(path_to_file, denoise_method='dwt', n_noise_layers=2, wavelet='db8', level=5,
-                    threshold_method='soft', threshold_factor=1.0, plot=False,
+                    threshold_method='soft', threshold_factor=0.9, plot=False,
                     denoise_strength=0.7, preserve_ratio=0.3, save_csv=False, csv_path=None):
     """
     Process audio file with wavelet transformation, remove noise, and plot results.
