@@ -1,5 +1,4 @@
 import numpy as np
-from scipy import signal
 
 
 def trim_silence(audio, sr=44100, frame_ms=20, hop_ms=10, threshold_factor=0.05, min_silence_ms=100):

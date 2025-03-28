@@ -4,6 +4,9 @@ import os
 import random
 import traceback
 
+from src.predict import predict_denoised
+from src.utils import get_best_prediction, split_species_safely
+
 # Set environment variables before importing any other libraries
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
@@ -63,9 +66,9 @@ logging.basicConfig(level=logging.INFO)
 import pandas as pd
 from tqdm import tqdm
 
-from audio import save_audio
-from birdnet import analyze_audio
-from wavelet import wavelet_denoise
+from src.audio import save_audio
+from src.birdnet import analyze_audio
+from src.wavelet import wavelet_denoise
 
 
 def get_data_path():
@@ -94,19 +97,8 @@ def read_df():
 DF = read_df()
 
 
-def split_species_safely(species_str):
-    """
-    Safely split species string into scientific and common name
-    Returns tuple of (scientific_name, common_name)
-    """
-    try:
-        if species_str and "_" in species_str:
-            parts = species_str.split("_", 1)
-            return parts[0], parts[1]
-        else:
-            return "", ""
-    except Exception:
-        return "", ""
+TFILE = "bn/BirdNET_GLOBAL_6K_V2.4_Model_FP32.tflite"
+LABELS_FILE = "bn/BirdNET_GLOBAL_6K_V2.4_Labels.txt"
 
 
 def main():
@@ -116,7 +108,7 @@ def main():
         return
 
     # Take a random sample of 100 rows
-    sample_df = DF.sample(n=100, random_state=random.randint(0, 1000))
+    sample_df = DF.sample(n=20, random_state=random.randint(0, 1000))
 
     # Initialize counters
     original_correct = 0
@@ -124,20 +116,14 @@ def main():
     total_processed = 0
     errors = 0
 
-    # Create output directory
-    output_dir = "denoised_audio"
-    os.makedirs(output_dir, exist_ok=True)
-
     # Paths to BirdNET model files
-    tflite = "/home/mikhail/prj/bird_clef_25/bn/BirdNET_GLOBAL_6K_V2.4_Model_FP32.tflite"
-    labels_file = "/home/mikhail/prj/bird_clef_25/bn/BirdNET_GLOBAL_6K_V2.4_Labels.txt"
 
     # Check if files exist
-    if not os.path.exists(tflite):
-        print(f"Error: Model file not found at {tflite}")
+    if not os.path.exists(TFILE):
+        print(f"Error: Model file not found at {TFILE}")
         return
-    if not os.path.exists(labels_file):
-        print(f"Error: Labels file not found at {labels_file}")
+    if not os.path.exists(LABELS_FILE):
+        print(f"Error: Labels file not found at {LABELS_FILE}")
         return
 
     for idx, row in tqdm(sample_df.iterrows(), total=len(sample_df), desc="Processing audio files"):
@@ -147,44 +133,27 @@ def main():
 
         # Construct input and output paths
         input_file = os.path.join(get_data_path(), "train_audio", filename)
-        output_file = os.path.join(output_dir, os.path.basename(filename))
 
         if not os.path.exists(input_file):
             print(f"Error: Input file not found at {input_file}")
             continue
 
         try:
-            # Denoise and save the audio
-            denoised_file = output_file + ".wav"
-            if not os.path.exists(denoised_file):
-                sr, denoised = wavelet_denoise(input_file)
-                save_audio(denoised, sr, denoised_file, "wav")
-            else:
-                print("File exists, skipping denoising:", denoised_file)
-
             # Default values in case no predictions are made
             orig_scientific, orig_common = "", ""
             denoised_scientific, denoised_common = "", ""
 
+            # Denoise and save the audio
+            denoised_common, denoised_scientific = predict_denoised(input_file)
+
             # Analyze original audio
-            original_predictions = analyze_audio(input_file, tflite, labels_file)
+            original_predictions = analyze_audio(input_file, TFILE, LABELS_FILE)
             if original_predictions and len(original_predictions) > 0:
-                top_original = original_predictions[0]
-                orig_scientific, orig_common = split_species_safely(top_original.get("species", ""))
+                # top_original = original_predictions[0]
+                prediction = get_best_prediction(original_predictions)
+                orig_scientific, orig_common = split_species_safely(prediction)
             else:
                 print(f"No predictions for original file: {filename}")
-
-            # Analyze denoised audio
-            denoised_predictions = analyze_audio(denoised_file, tflite, labels_file)
-            if denoised_predictions and len(denoised_predictions) > 0:
-                top_denoised = denoised_predictions[0]
-                denoised_scientific, denoised_common = split_species_safely(top_denoised.get("species", ""))
-            else:
-                print(f"No predictions for denoised file: {filename}")
-
-            # Clean up temporary file
-            if os.path.exists(denoised_file):
-                os.remove(denoised_file)
 
             # Check if predictions are correct (case insensitive comparison)
             if orig_scientific.lower() == scientific_name.lower() or orig_common.lower() == common_name.lower():

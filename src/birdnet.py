@@ -1,9 +1,6 @@
-import os
+import librosa
 import numpy as np
 import tensorflow as tf
-import librosa
-import argparse
-from datetime import datetime
 
 
 # BirdNET model loading and prediction functions
@@ -114,37 +111,3 @@ def analyze_audio(audio_file, model_path, labels_file, confidence_threshold=0.5)
     results.sort(key=lambda x: x["confidence"], reverse=True)
 
     return results
-
-
-def main():
-    parser = argparse.ArgumentParser(description='Analyze bird sounds in audio file.')
-    parser.add_argument('audio_file', help='Path to audio file to analyze')
-    parser.add_argument('--model', default='BirdNET_GLOBAL_3K_V2.1_MData_model.tflite',
-                        help='Path to BirdNET model file')
-    parser.add_argument('--labels', default='BirdNET_GLOBAL_3K_V2.1_MData_labels.txt',
-                        help='Path to labels file')
-    parser.add_argument('--threshold', type=float, default=0.5,
-                        help='Confidence threshold for results (0-1)')
-    args = parser.parse_args()
-
-    results = analyze_audio(
-        args.audio_file,
-        args.model,
-        args.labels,
-        args.threshold
-    )
-
-    # Print results
-    print(f"\nAnalysis of {args.audio_file}:")
-    if results:
-        print(f"Found {len(results)} bird species with confidence above {args.threshold}:")
-        for i, result in enumerate(results, 1):
-            print(f"{i}. {result['species']} - {result['confidence']:.2%} (at {result['timestamp']})")
-    else:
-        print("No bird species detected above the confidence threshold.")
-
-    return results
-
-
-if __name__ == "__main__":
-    main()

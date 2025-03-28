@@ -40,6 +40,7 @@ def save_audio(signal, sr, file_path, format):
         file_path (str): Path to save the audio file
         format (str): Audio format
     """
+    print("saving audio to", file_path)
     if format.lower() == 'mp3':
         # For MP3 format, use pydub
         try:

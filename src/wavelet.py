@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
-
-from audio import parse_file, save_audio
 from PyEMD import EMD as PyEMD  # Import the EMD implementation
+
+from src.audio import parse_file, save_audio
 
 
 def remove_noise_layers(coeffs, n_layers_to_remove=1, threshold_method='soft', threshold_factor=1.0):
