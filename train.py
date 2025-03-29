@@ -4,8 +4,8 @@ import os
 import random
 import traceback
 
-from src.predict import predict_denoised
-from src.utils import get_best_prediction, split_species_safely
+import json
+import numpy as np
 
 # Set environment variables before importing any other libraries
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -66,9 +66,9 @@ logging.basicConfig(level=logging.INFO)
 import pandas as pd
 from tqdm import tqdm
 
-from src.audio import save_audio
 from src.birdnet import analyze_audio
 from src.wavelet import wavelet_denoise
+from src.utils import get_best_prediction, split_species_safely, calculate_probability
 
 
 def get_data_path():
@@ -101,6 +101,39 @@ TFILE = "bn/BirdNET_GLOBAL_6K_V2.4_Model_FP32.tflite"
 LABELS_FILE = "bn/BirdNET_GLOBAL_6K_V2.4_Labels.txt"
 
 
+def predict_denoised(input_file):
+    """
+    Analyze an audio file with wavelet denoising and return the best prediction.
+
+    Returns:
+        tuple: (common_name, scientific_name) of the best prediction
+    """
+    # Apply wavelet denoising
+    sr, denoised = wavelet_denoise(input_file,
+                                   denoise_method='emd',
+                                   n_noise_layers=3,
+                                   wavelet='db8',
+                                   level=5,
+                                   threshold_method='soft',
+                                   threshold_factor=0.9,
+                                   denoise_strength=2.0,
+                                   preserve_ratio=0.9
+                                   )
+
+    # Analyze denoised audio directly without saving to a file
+    denoised_predictions = analyze_audio(denoised, TFILE, LABELS_FILE, sample_rate=sr)
+    denoised_predictions = calculate_probability(denoised_predictions)
+    print(json.dumps(denoised_predictions, indent=4))
+
+    # Get the best prediction
+    if denoised_predictions and len(denoised_predictions) > 0:
+        prediction = get_best_prediction(denoised_predictions)
+        scientific_name, common_name = split_species_safely(prediction)
+        return common_name, scientific_name
+    else:
+        return "", ""
+
+
 def main():
     # Check if DataFrame was successfully loaded
     if DF is None:
@@ -116,8 +149,6 @@ def main():
     total_processed = 0
     errors = 0
 
-    # Paths to BirdNET model files
-
     # Check if files exist
     if not os.path.exists(TFILE):
         print(f"Error: Model file not found at {TFILE}")
@@ -131,7 +162,7 @@ def main():
         scientific_name = row['scientific_name']
         common_name = row['common_name']
 
-        # Construct input and output paths
+        # Construct input path
         input_file = os.path.join(get_data_path(), "train_audio", filename)
 
         if not os.path.exists(input_file):
@@ -141,15 +172,14 @@ def main():
         try:
             # Default values in case no predictions are made
             orig_scientific, orig_common = "", ""
-            denoised_scientific, denoised_common = "", ""
+            denoised_common, denoised_scientific = "", ""
 
-            # Denoise and save the audio
+            # Process with denoising and get prediction
             denoised_common, denoised_scientific = predict_denoised(input_file)
 
             # Analyze original audio
             original_predictions = analyze_audio(input_file, TFILE, LABELS_FILE)
             if original_predictions and len(original_predictions) > 0:
-                # top_original = original_predictions[0]
                 prediction = get_best_prediction(original_predictions)
                 orig_scientific, orig_common = split_species_safely(prediction)
             else:

@@ -5,9 +5,12 @@ if __name__ == "__main__":
     workd_dir = "/home/mikhail/prj/bc_25_data/work/"
     audio_directory = "/home/mikhail/prj/bc_25_data/small_soundscapes"
     species_csv_path = "/home/mikhail/prj/bc_25_data/taxonomy.csv"
+    sample_csv_path = "/home/mikhail/prj/bc_25_data/sample_submission.csv"
     output_file_path = "submission.csv"
 
     process_all_audio_files(workd_dir,
-                            audio_directory,
+                            [audio_directory],
                             species_csv_path,
-                            output_file_path)
+                            output_file_path,
+                            sample_csv_path,
+                            dir_limit=10)

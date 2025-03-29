@@ -2,13 +2,19 @@ import librosa
 import numpy as np
 import tensorflow as tf
 
+# Global variables to store loaded model and labels
+_interpreter = None
+_labels = None
+
 
 # BirdNET model loading and prediction functions
 def load_model(model_path):
     """Load the BirdNET model from the specified path."""
-    interpreter = tf.lite.Interpreter(model_path=model_path)
-    interpreter.allocate_tensors()
-    return interpreter
+    global _interpreter
+    if _interpreter is None:
+        _interpreter = tf.lite.Interpreter(model_path=model_path)
+        _interpreter.allocate_tensors()
+    return _interpreter
 
 
 def predict(interpreter, audio_data, sample_rate=48000):
@@ -42,35 +48,42 @@ def predict(interpreter, audio_data, sample_rate=48000):
 
 def load_labels(labels_file):
     """Load species labels from file."""
-    with open(labels_file, 'r', encoding='utf-8') as f:
-        labels = [line.strip() for line in f]
-    return labels
+    global _labels
+    if _labels is None:
+        with open(labels_file, 'r', encoding='utf-8') as f:
+            _labels = [line.strip() for line in f]
+    return _labels
 
 
-def analyze_audio(audio_file, model_path, labels_file, confidence_threshold=0.5):
+def analyze_audio(audio_input, model_path, labels_file, confidence_threshold=0.5, sample_rate=None):
     """
-    Analyze bird sounds in an audio file.
+    Analyze bird sounds in an audio file or audio signal.
 
     Parameters:
-    - audio_file: Path to the audio file to analyze
+    - audio_input: Path to the audio file to analyze OR a tuple of (audio_signal, sample_rate)
     - model_path: Path to the BirdNET model
     - labels_file: Path to the file containing species labels
     - confidence_threshold: Minimum confidence score to include in results
+    - sample_rate: Sample rate of the audio (only used if audio_input is a signal)
 
     Returns:
     - List of dictionaries containing species and confidence scores
     """
-    # Load model and labels
+    # Load model and labels (uses cached versions if already loaded)
     interpreter = load_model(model_path)
     labels = load_labels(labels_file)
 
-    # Load and preprocess audio
-    audio, sr = librosa.load(audio_file, sr=48000, mono=True)
+    audio = audio_input
+    sr = sample_rate if sample_rate is not None else 48000
+
+    # Ensure correct sample rate
+    if sr != 48000:
+        audio = librosa.resample(audio, orig_sr=sr, target_sr=48000)
+        sr = 48000
 
     # Create sliding windows (3-second segments with 1.5-second overlap)
     window_size = 3 * sr
     hop_size = window_size // 2
-    timestamps = []
     results = []
 
     for i in range(0, len(audio) - window_size + 1, hop_size):
