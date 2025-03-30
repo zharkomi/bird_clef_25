@@ -2,20 +2,96 @@ import json
 # Enable faulthandler for better debugging
 import os
 import time
-import uuid
 
 import pandas as pd
 
-from src.audio import save_audio
+from src.audio import parse_file
 from src.birdnet import analyze_audio
-from src.utils import split_species_safely, calculate_probability
+from src.utils import split_species_safely
 from src.wavelet import wavelet_denoise
 
 TFILE = "bn/BirdNET_GLOBAL_6K_V2.4_Model_FP32.tflite"
 LABELS_FILE = "bn/BirdNET_GLOBAL_6K_V2.4_Labels.txt"
 
 
-def predict_denoised(workd_dir, input_file):
+def merge_consecutive_segments(predictions):
+    """
+    Merge consecutive segments of the same species from BirdNET predictions.
+
+    Args:
+        predictions (list): List of prediction objects from analyze_audio, each containing
+                           species, confidence, and timestamp.
+
+    Returns:
+        list: Merged predictions with:
+              - Start time from first segment
+              - End time from last segment
+              - Max confidence from all merged segments
+              - Other fields preserved
+    """
+    if not predictions:
+        return []
+
+    # Sort predictions by species and start time
+    sorted_predictions = sorted(predictions, key=lambda x: (
+        x["species"],
+        float(x["timestamp"].split("-")[0])
+    ))
+
+    merged_predictions = []
+    current_group = None
+
+    for pred in sorted_predictions:
+        # Extract species and time information
+        species = pred["species"]
+        start_time, end_time = map(float, pred["timestamp"].split("-"))
+        confidence = pred["confidence"]
+
+        # If this is a new group or different species
+        if (current_group is None or
+                current_group["species"] != species):
+
+            # Save the previous group if it exists
+            if current_group is not None:
+                merged_predictions.append({
+                    "species": current_group["species"],
+                    "confidence": current_group["max_confidence"],
+                    "timestamp": f"{current_group['start_time']:.2f}-{current_group['end_time']:.2f}"
+                })
+
+            # Start a new group
+            current_group = {
+                "species": species,
+                "start_time": start_time,
+                "end_time": end_time,
+                "max_confidence": confidence
+            }
+        else:
+            # Extend the current group and update max confidence
+            current_group["end_time"] = max(current_group["end_time"], end_time)
+            current_group["max_confidence"] = max(current_group["max_confidence"], confidence)
+
+    # Add the last group
+    if current_group is not None:
+        merged_predictions.append({
+            "species": current_group["species"],
+            "confidence": current_group["max_confidence"],
+            "timestamp": f"{current_group['start_time']:.2f}-{current_group['end_time']:.2f}"
+        })
+
+    return merged_predictions
+
+
+def predict_denoised(sr, y,
+                     denoise_method='emd',
+                     n_noise_layers=3,
+                     wavelet='db8',
+                     level=5,
+                     threshold_method='soft',
+                     threshold_factor=0.9,
+                     denoise_strength=2.0,
+                     preserve_ratio=0.9
+                     ):
     """
     Analyze an audio file with wavelet denoising and return all predictions.
 
@@ -23,20 +99,21 @@ def predict_denoised(workd_dir, input_file):
         list: List of prediction objects, each containing species, confidence, timestamp, and probability
     """
     # Apply wavelet denoising
-    sr, denoised = wavelet_denoise(input_file,
-                                   denoise_method='emd',
-                                   n_noise_layers=3,
-                                   wavelet='db8',
-                                   level=5,
-                                   threshold_method='soft',
-                                   threshold_factor=0.9,
-                                   denoise_strength=2.0,
-                                   preserve_ratio=0.9
+    sr, denoised = wavelet_denoise(sr, y,
+                                   denoise_method=denoise_method,
+                                   n_noise_layers=n_noise_layers,
+                                   wavelet=wavelet,
+                                   level=level,
+                                   threshold_method=threshold_method,
+                                   threshold_factor=threshold_factor,
+                                   denoise_strength=denoise_strength,
+                                   preserve_ratio=preserve_ratio
                                    )
 
     # Analyze denoised audio directly without saving to a file
     denoised_predictions = analyze_audio(denoised, TFILE, LABELS_FILE, sample_rate=sr)
-    denoised_predictions = calculate_probability(denoised_predictions)
+    denoised_predictions = merge_consecutive_segments(denoised_predictions)
+    # denoised_predictions = calculate_probability(denoised_predictions)
     print(json.dumps(denoised_predictions, indent=4))
 
     # Return all predictions
@@ -123,8 +200,18 @@ def load_sample_submission(sample_path):
         return None
 
 
-# Main function to process all audio files from multiple directories
-def process_all_audio_files(workd_dir, audio_dirs, csv_path, output_path, sample_submission_path, dir_limit=0):
+def process_all_audio_files(workd_dir, audio_dir, csv_path, output_path, labels_dir, dir_limit=0):
+    """
+    Process all audio files from a single directory and create predictions.
+
+    Args:
+        workd_dir (str): Working directory
+        audio_dir (str): Directory containing audio files
+        csv_path (str): Path to the CSV with species information
+        output_path (str): Path to save the output CSV
+        labels_dir (str): Directory to extract class labels from
+        dir_limit (int): Limit on number of files to process (0 = no limit)
+    """
     # Load species data
     try:
         species_df, scientific_to_id, common_to_id = load_species_data(csv_path)
@@ -134,72 +221,118 @@ def process_all_audio_files(workd_dir, audio_dirs, csv_path, output_path, sample
         print(f"Error loading species data: {str(e)}. Skipping.")
         return
 
-    # Load sample submission to get expected structure
+    # Get class labels (column names) from directory
     try:
-        sample_df = load_sample_submission(sample_submission_path)
-        if sample_df is None:
-            print("Cannot continue without sample submission file.")
-            return
+        # Extract the class labels from the provided labels directory
+        class_labels = sorted(os.listdir(labels_dir))
+        expected_columns = ['row_id'] + class_labels
+        print(f"Using {len(class_labels)} class labels from directory: {labels_dir}")
     except Exception as e:
-        print(f"Error loading sample submission: {str(e)}. Cannot continue.")
+        print(f"Error getting class labels from directory {labels_dir}: {str(e)}. Cannot continue.")
         return
 
-    # Get expected columns from sample submission
-    expected_columns = sample_df.columns.tolist()
-    print(f"Expected columns from sample submission: {expected_columns}")
+    # Prepare results DataFrame
+    predictions = pd.DataFrame(columns=expected_columns)
 
-    # Prepare results list
-    all_results = []
+    # Make sure the directory exists
+    if not os.path.isdir(audio_dir):
+        print(f"Warning: Directory {audio_dir} does not exist. Skipping.")
+        return
 
     # Tracking time metrics
     total_processing_time = 0
     total_files = 0
+    count = 0
 
-    # Process each directory in the audio_dirs array
-    for audio_dir in audio_dirs:
-        print(f"\n------------------------- Processing directory: {audio_dir}")
+    try:
+        # Process each audio file in the directory
+        test_soundscapes = [os.path.join(audio_dir, afile) for afile in
+                            sorted(os.listdir(audio_dir)) if afile.endswith('.ogg')]
+    except Exception as e:
+        print(f"Error listing directory {audio_dir}: {str(e)}. Skipping.")
+        return
 
-        # Make sure the directory exists
-        if not os.path.isdir(audio_dir):
-            print(f"Warning: Directory {audio_dir} does not exist. Skipping.")
-            continue
+    print(f"\n------------------------- Processing directory: {audio_dir}")
+    print(f"Found {len(test_soundscapes)} audio files to process")
 
-        count = 0
+    for file_path in test_soundscapes:
         try:
-            # Process each audio file in the current directory
-            test_soundscapes = [os.path.join(audio_dir, afile) for afile in
-                                sorted(os.listdir(audio_dir)) if afile.endswith('.ogg')]
-        except Exception as e:
-            print(f"Error listing directory {audio_dir}: {str(e)}. Skipping.")
-            continue
+            start_time = time.time()
 
-        for filename in test_soundscapes:
-            try:
-                if filename.endswith('.ogg'):  # Add other audio formats if needed
-                    start_time = time.time()
+            print(f"\n-------------- Predicting for file: {file_path}")
+            filename = os.path.basename(file_path)
 
-                    print(f"\n-------------- Predicting for file: {filename}")
-                    file_path = os.path.join(audio_dir, filename)
-                    file_results = process_audio_file(workd_dir, file_path, scientific_to_id, common_to_id,
-                                                      expected_columns)
+            # Extract soundscape_id from the filename
+            soundscape_id = filename.replace(".ogg", "")
 
-                    if file_results:
-                        all_results.extend(file_results)
+            # Parse audio file if existing results weren't found
+            sr, y = parse_file(file_path)
 
-                    # Calculate and record processing time
-                    end_time = time.time()
-                    elapsed_time = end_time - start_time
-                    total_processing_time += elapsed_time
+            # Get predictions
+            predictions_list = predict_denoised(sr, y)
 
-                    print(f"Processing time for {filename}: {elapsed_time:.2f} seconds")
-
-                    total_files += 1
-                    count += 1
-                    if 0 < dir_limit <= count:
-                        break
-            except Exception as e:
-                print(f"Error processing file {filename}: {str(e)}. Skipping.")
+            if not predictions_list or len(predictions_list) == 0:
+                print(f"No predictions for file: {file_path}")
                 continue
+
+            # Process each prediction
+            for prediction in predictions_list:
+                # Extract species information
+                species_full = prediction["species"]
+                scientific_name, common_name = split_species_safely(species_full)
+
+                # Extract timestamp and convert to end time in seconds
+                timestamp = prediction["timestamp"]
+                end_time = int(float(timestamp.split("-")[1]))
+
+                # Find the species ID
+                species_id = None
+
+                # Try to match by scientific name first
+                if scientific_name in scientific_to_id:
+                    species_id = scientific_to_id[scientific_name]
+                # If no match, try common name
+                elif common_name in common_to_id:
+                    species_id = common_to_id[common_name]
+
+                if species_id is None:
+                    print(f"No matching species ID found for {scientific_name} / {common_name}")
+                    continue
+                else:
+                    print(species_id + ": " + scientific_name + ", " + common_name)
+
+                # Create the row_id
+                row_id = f"{soundscape_id}_{end_time}"
+
+                # Initialize new row with all zeros for species probabilities
+                new_row_data = {'row_id': row_id}
+                for label in class_labels:
+                    new_row_data[label] = 0.0
+
+                # Set the probability for the detected species
+                if species_id in new_row_data:
+                    new_row_data[species_id] = 1.0
+                    # Add row to DataFrame
+                    new_row = pd.DataFrame([new_row_data])
+                    predictions = pd.concat([predictions, new_row], axis=0, ignore_index=True)
+                else:
+                    print("Species ID not found in expected columns")
+
+            # Calculate and record processing time
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            total_processing_time += elapsed_time
+
+            print(f"Processing time for {filename}: {elapsed_time:.2f} seconds")
+
+            total_files += 1
+            count += 1
+            if 0 < dir_limit <= count:
+                break
+
+        except Exception as e:
+            print(f"Error processing file {file_path}: {str(e)}. Skipping.")
+            continue
 
     # Calculate average processing time
     if total_files > 0:
@@ -209,27 +342,9 @@ def process_all_audio_files(workd_dir, audio_dirs, csv_path, output_path, sample
         print(f"Average processing time per file: {avg_time:.2f} seconds")
         print(f"Total processing time: {total_processing_time:.2f} seconds")
 
-    # Convert results to DataFrame and save
+    # Save to CSV
     try:
-        if all_results:
-            # Create DataFrame with all results
-            results_df = pd.DataFrame(all_results)
-
-            # Ensure all expected columns are present
-            for col in expected_columns:
-                if col not in results_df.columns:
-                    results_df[col] = 0.0
-
-            # Reorder columns to match sample submission
-            results_df = results_df[expected_columns]
-
-            # Save to CSV
-            results_df.to_csv(output_path, index=False)
-            print(f"Results saved to {output_path}")
-        else:
-            # If no results, create an empty DataFrame with the expected structure
-            empty_df = pd.DataFrame(columns=expected_columns)
-            empty_df.to_csv(output_path, index=False)
-            print(f"No results generated. Empty file with expected structure created at {output_path}")
+        predictions.to_csv(output_path, index=False)
+        print(f"Results saved to {output_path}")
     except Exception as e:
         print(f"Error saving results to {output_path}: {str(e)}")

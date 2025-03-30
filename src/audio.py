@@ -9,24 +9,10 @@ import soundfile as sf
 from pydub import AudioSegment
 
 
-def parse_file(path_to_file, save_csv):
-    csv_file = path_to_file + ".csv"
-    if save_csv and os.path.exists(csv_file):
-        # Load from CSV
-        print(f"Loading pre-parsed data from {csv_file}")
-        df = pd.read_csv(csv_file)
-        y = df['amplitude'].values
-        sr = df.attrs.get('sample_rate', 32000)  # Default sample rate if missing
-    else:
-        # Load and parse OGG file
-        print(f"Parsing {path_to_file} ")
-        y, sr = librosa.load(path_to_file, sr=None)
-        if save_csv:
-            # Save parsed data to CSV
-            df = pd.DataFrame({"amplitude": y})
-            df.attrs['sample_rate'] = sr
-            df.to_csv(csv_file, index=False)
-            print("Saved to CSV file:", csv_file)
+def parse_file(path_to_file):
+    # Load and parse OGG file
+    print(f"Parsing {path_to_file} ")
+    y, sr = librosa.load(path_to_file, sr=None)
     return sr, y
 
 

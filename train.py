@@ -1,11 +1,15 @@
 # Enable faulthandler for better debugging
+import csv
 import faulthandler
+import itertools
 import os
 import random
+import time
 import traceback
+from datetime import datetime, timedelta
 
-import json
-import numpy as np
+from src.audio import parse_file
+from src.predict import predict_denoised
 
 # Set environment variables before importing any other libraries
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -67,8 +71,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from src.birdnet import analyze_audio
-from src.wavelet import wavelet_denoise
-from src.utils import get_best_prediction, split_species_safely, calculate_probability
+from src.utils import get_best_prediction, split_species_safely
 
 
 def get_data_path():
@@ -96,45 +99,18 @@ def read_df():
 
 DF = read_df()
 
-
 TFILE = "bn/BirdNET_GLOBAL_6K_V2.4_Model_FP32.tflite"
 LABELS_FILE = "bn/BirdNET_GLOBAL_6K_V2.4_Labels.txt"
 
 
-def predict_denoised(input_file):
-    """
-    Analyze an audio file with wavelet denoising and return the best prediction.
-
-    Returns:
-        tuple: (common_name, scientific_name) of the best prediction
-    """
-    # Apply wavelet denoising
-    sr, denoised = wavelet_denoise(input_file,
-                                   denoise_method='emd',
-                                   n_noise_layers=3,
-                                   wavelet='db8',
-                                   level=5,
-                                   threshold_method='soft',
-                                   threshold_factor=0.9,
-                                   denoise_strength=2.0,
-                                   preserve_ratio=0.9
-                                   )
-
-    # Analyze denoised audio directly without saving to a file
-    denoised_predictions = analyze_audio(denoised, TFILE, LABELS_FILE, sample_rate=sr)
-    denoised_predictions = calculate_probability(denoised_predictions)
-    print(json.dumps(denoised_predictions, indent=4))
-
-    # Get the best prediction
-    if denoised_predictions and len(denoised_predictions) > 0:
-        prediction = get_best_prediction(denoised_predictions)
-        scientific_name, common_name = split_species_safely(prediction)
-        return common_name, scientific_name
-    else:
-        return "", ""
-
-
-def main():
+def calc_dif(denoise_method='emd',
+             n_noise_layers=3,
+             wavelet='db8',
+             level=5,
+             threshold_method='soft',
+             threshold_factor=0.9,
+             denoise_strength=2.0,
+             preserve_ratio=0.9):
     # Check if DataFrame was successfully loaded
     if DF is None:
         print("Error: Could not load DataFrame. Exiting.")
@@ -174,11 +150,28 @@ def main():
             orig_scientific, orig_common = "", ""
             denoised_common, denoised_scientific = "", ""
 
+            # Parse audio file if existing results weren't found
+            sr, y = parse_file(input_file)
+
             # Process with denoising and get prediction
-            denoised_common, denoised_scientific = predict_denoised(input_file)
+            denoised_predictions = predict_denoised(sr, y,
+                                                    denoise_method=denoise_method,
+                                                    n_noise_layers=n_noise_layers,
+                                                    wavelet=wavelet,
+                                                    level=level,
+                                                    threshold_method=threshold_method,
+                                                    threshold_factor=threshold_factor,
+                                                    denoise_strength=denoise_strength,
+                                                    preserve_ratio=preserve_ratio
+                                                    )
+            if denoised_predictions and len(denoised_predictions) > 0:
+                prediction = get_best_prediction(denoised_predictions)
+                denoised_scientific, denoised_common = split_species_safely(prediction)
+            else:
+                print(f"No predictions for denoised file: {filename}")
 
             # Analyze original audio
-            original_predictions = analyze_audio(input_file, TFILE, LABELS_FILE)
+            original_predictions = analyze_audio(y, TFILE, LABELS_FILE, sample_rate=sr)
             if original_predictions and len(original_predictions) > 0:
                 prediction = get_best_prediction(original_predictions)
                 orig_scientific, orig_common = split_species_safely(prediction)
@@ -223,6 +216,116 @@ def main():
     else:
         print("Denoising had no effect on accuracy")
 
+    return denoised_correct - original_correct
+
+
+# Define parameter search space
+param_map = {
+    'denoise_method': ['dwt', 'wpt', 'emd'],
+    'n_noise_layers': [1, 3, 6],
+    # 'wavelet': ['dmey', 'db6', 'db4', 'db8', 'sym8', 'coif3'],
+    'wavelet': ['bior4.4', 'dmey'],
+    'level': [1, 3, 6],
+    'threshold_method': ['soft', 'hard'],
+    'threshold_factor': [0.1, 1.0, 2.0],
+    'denoise_strength': [0.5],
+    'preserve_ratio': [0.9]
+}
+
+
+def brute_force():
+    # Calculate total number of iterations
+    total_iterations = 1
+    for param_values in param_map.values():
+        total_iterations *= len(param_values)
+
+    print(f"Total number of iterations: {total_iterations}")
+
+    # Generate all parameter combinations
+    param_keys = list(param_map.keys())
+    param_values = list(param_map.values())
+    combinations = list(itertools.product(*param_values))
+
+    # Prepare results storage
+    results = []
+
+    # Start timing
+    start_time = time.time()
+    last_update_time = start_time
+
+    # Create output CSV file
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_filename = f"optimization_results_{timestamp}.csv"
+
+    with open(output_filename, 'w', newline='') as csvfile:
+        # Create CSV writer
+        csv_writer = csv.writer(csvfile)
+
+        # Write header row
+        header = param_keys + ['result', 'execution_time']
+        csv_writer.writerow(header)
+
+        # Process all combinations
+        for i, combo in enumerate(combinations):
+            # Create parameter dictionary for this combination
+            params = dict(zip(param_keys, combo))
+
+            # Time this specific iteration
+            iter_start = time.time()
+
+            # Calculate result for this parameter set
+            result = calc_dif(**params)
+
+            # Calculate iteration time
+            iter_time = time.time() - iter_start
+
+            # Add to results
+            row = list(combo) + [result, iter_time]
+            csv_writer.writerow(row)
+            results.append((params, result, iter_time))
+
+            # Update progress every 100 iterations or 5 seconds
+            current_time = time.time()
+            if i % 100 == 0 or current_time - last_update_time > 5:
+                # Calculate progress and estimate remaining time
+                progress = (i + 1) / total_iterations
+                elapsed = current_time - start_time
+                if progress > 0:
+                    estimated_total = elapsed / progress
+                    remaining = estimated_total - elapsed
+                    eta = datetime.now() + timedelta(seconds=remaining)
+
+                    # Print progress update
+                    print(f"Progress: {i + 1}/{total_iterations} ({progress:.1%})")
+                    print(f"Elapsed time: {timedelta(seconds=int(elapsed))}")
+                    print(f"Estimated remaining: {timedelta(seconds=int(remaining))}")
+                    print(f"ETA: {eta.strftime('%H:%M:%S')}")
+                    print(f"Average iteration time: {elapsed / (i + 1):.4f} seconds")
+                    print("---")
+
+                    # Flush the CSV to disk
+                    csvfile.flush()
+
+                    # Update last update time
+                    last_update_time = current_time
+
+    # Find the best result
+    best_result = max(results, key=lambda x: x[1])
+    best_params, best_value, _ = best_result
+
+    print("\nOptimization complete!")
+    print(f"Results saved to: {output_filename}")
+    print(f"Best result: {best_value}")
+    print("Best parameters:")
+    for key, value in best_params.items():
+        print(f"  {key}: {value}")
+
+    # Total execution time
+    total_time = time.time() - start_time
+    print(f"Total execution time: {timedelta(seconds=int(total_time))}")
+
+    return best_params, best_value
+
 
 if __name__ == "__main__":
-    main()
+    brute_force()

@@ -55,7 +55,7 @@ def load_labels(labels_file):
     return _labels
 
 
-def analyze_audio(audio_input, model_path, labels_file, confidence_threshold=0.5, sample_rate=None):
+def analyze_audio(audio_input, model_path, labels_file, confidence_threshold=0.5, sample_rate=32000):
     """
     Analyze bird sounds in an audio file or audio signal.
 

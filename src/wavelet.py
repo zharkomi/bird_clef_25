@@ -732,9 +732,9 @@ def normalize_signal_lengths(y, denoised_signal, noise_signal):
     return y[:min_length], denoised_signal[:min_length], noise_signal[:min_length]
 
 
-def wavelet_denoise(path_to_file, denoise_method='dwt', n_noise_layers=2, wavelet='db8', level=5,
+def wavelet_denoise(sr, y, denoise_method='dwt', n_noise_layers=2, wavelet='db8', level=5,
                     threshold_method='soft', threshold_factor=0.9, plot=False,
-                    denoise_strength=0.7, preserve_ratio=0.3, save_csv=False, csv_path=None):
+                    denoise_strength=0.5, preserve_ratio=0.8, save_csv=False, csv_path=None):
     """
     Process audio file with wavelet transformation, remove noise, and plot results.
     Can save results to CSV and load from existing CSV if available.
@@ -759,25 +759,6 @@ def wavelet_denoise(path_to_file, denoise_method='dwt', n_noise_layers=2, wavele
         tuple: (sr, y, denoised_signal, noise_signal) - Sample rate, original signal,
                denoised signal, and noise signal
     """
-    # Generate configuration ID and CSV path
-    if save_csv:
-        config_id = generate_config_id(
-            path_to_file, denoise_method, n_noise_layers, wavelet, level,
-            threshold_method, threshold_factor, denoise_strength, preserve_ratio
-        )
-        csv_path = get_csv_path(path_to_file, csv_path, denoise_method)
-
-        # Try to load existing results
-        found, sr, y, denoised_signal, noise_signal = load_existing_results(csv_path, config_id)
-        if found:
-            # Plot signals if requested
-            if plot:
-                plot_signals(y, denoised_signal, noise_signal, sr, path_to_file, n_noise_layers)
-            return sr, denoised_signal
-
-    # Parse audio file if existing results weren't found
-    sr, y = parse_file(path_to_file, save_csv)
-
     # Process using the requested method
     if denoise_method.lower() == 'dwt':
         denoised_signal, noise_signal = process_with_dwt(
