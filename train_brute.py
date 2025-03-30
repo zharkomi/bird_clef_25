@@ -171,7 +171,7 @@ def calc_dif(denoise_method='emd',
                 print(f"No predictions for denoised file: {filename}")
 
             # Analyze original audio
-            original_predictions = analyze_audio(y, TFILE, LABELS_FILE, sample_rate=sr)
+            original_predictions = analyze_audio(y, TFILE, LABELS_FILE, sr=sr)
             if original_predictions and len(original_predictions) > 0:
                 prediction = get_best_prediction(original_predictions)
                 orig_scientific, orig_common = split_species_safely(prediction)

@@ -9,9 +9,8 @@ if __name__ == "__main__":
     sample_csv_path = "/home/mikhail/prj/bc_25_data/sample_submission.csv"
     output_file_path = "submission.csv"
 
-    process_all_audio_files(workd_dir,
-                            audio_directory,
+    process_all_audio_files(audio_directory,
                             species_csv_path,
                             output_file_path,
                             train_directory,
-                            dir_limit=10)
+                            dir_limit=20)
