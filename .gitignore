@@ -175,3 +175,6 @@ cython_debug/
 
 python_functions_workbook.*
 submission.csv
+bn/*
+evo/*
+.idea/*

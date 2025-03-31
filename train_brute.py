@@ -7,6 +7,7 @@ import random
 import time
 import traceback
 from datetime import datetime, timedelta
+import concurrent.futures
 
 from src import utils
 from src.audio import parse_file
@@ -98,6 +99,48 @@ def read_df():
 DF = read_df()
 
 
+def process_file(data):
+    """
+    Process a single audio file with both original and denoised methods.
+    This function will be called by each worker in the parallel pool.
+
+    Args:
+        data: A tuple containing (idx, row, denoise_params)
+
+    Returns:
+        A tuple of (original_correct, denoised_correct, success_flag, filename)
+    """
+    idx, row, denoise_params = data
+    filename = row['filename']
+    primary_label = row['primary_label']
+
+    # Construct input path
+    input_file = os.path.join(get_data_path(), "train_audio", filename)
+
+    if not os.path.exists(input_file):
+        print(f"Error: Input file not found at {input_file}")
+        return 0, 0, False, filename
+
+    try:
+        # Parse audio file
+        sr, y = parse_file(input_file)
+
+        # Process with denoising and get prediction
+        _, denoised_predictions = predict_denoised(sr, y, **denoise_params)
+        denoised_correct = denoised_predictions.get(primary_label, 0)
+
+        # Analyze original audio
+        _, original_predictions = predict_audio(sr, y)
+        original_correct = original_predictions.get(primary_label, 0)
+
+        return original_correct, denoised_correct, True, filename
+
+    except Exception as e:
+        print(f"Error processing file {filename}: {str(e)}")
+        traceback.print_exc()
+        return 0, 0, False, filename
+
+
 def calc_dif(denoise_method='emd',
              n_noise_layers=3,
              wavelet='db8',
@@ -105,15 +148,31 @@ def calc_dif(denoise_method='emd',
              threshold_method='soft',
              threshold_factor=0.9,
              denoise_strength=2.0,
-             preserve_ratio=0.9):
+             preserve_ratio=0.9,
+             max_workers=20):  # New parameter for controlling parallelism
     try:
         # Check if DataFrame was successfully loaded
         if DF is None:
             print("Error: Could not load DataFrame. Exiting.")
-            return
+            return -10000
 
-        # Take a random sample of 100 rows
-        sample_df = DF.sample(n=20, random_state=random.randint(0, 1000))
+        # Take a random sample of rows
+        sample_df = DF.sample(n=max_workers, random_state=random.randint(0, 1000))
+
+        # Create a dictionary of denoising parameters
+        denoise_params = {
+            'denoise_method': denoise_method,
+            'n_noise_layers': n_noise_layers,
+            'wavelet': wavelet,
+            'level': level,
+            'threshold_method': threshold_method,
+            'threshold_factor': threshold_factor,
+            'denoise_strength': denoise_strength,
+            'preserve_ratio': preserve_ratio
+        }
+
+        # Prepare data for parallel processing
+        process_data = [(idx, row, denoise_params) for idx, row in sample_df.iterrows()]
 
         # Initialize counters
         original_correct = 0
@@ -121,51 +180,22 @@ def calc_dif(denoise_method='emd',
         total_processed = 0
         errors = 0
 
-        for idx, row in tqdm(sample_df.iterrows(), total=len(sample_df), desc="Processing audio files"):
-            filename = row['filename']
-            primary_label = row['primary_label']
+        # Process files in parallel
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # Submit tasks and create a list of futures
+            futures = [executor.submit(process_file, data) for data in process_data]
 
-            # Construct input path
-            input_file = os.path.join(get_data_path(), "train_audio", filename)
-
-            if not os.path.exists(input_file):
-                print(f"Error: Input file not found at {input_file}")
-                continue
-
-            try:
-                # Parse audio file if existing results weren't found
-                sr, y = parse_file(input_file)
-
-                # Process with denoising and get prediction
-                _, denoised_predictions = predict_denoised(sr, y,
-                                                           denoise_method=denoise_method,
-                                                           n_noise_layers=n_noise_layers,
-                                                           wavelet=wavelet,
-                                                           level=level,
-                                                           threshold_method=threshold_method,
-                                                           threshold_factor=threshold_factor,
-                                                           denoise_strength=denoise_strength,
-                                                           preserve_ratio=preserve_ratio
-                                                           )
-                if primary_label in denoised_predictions:
-                    denoised_correct += denoised_predictions[primary_label]
-
-                # Analyze original audio
-                _, original_predictions = predict_audio(sr, y)
-                if primary_label in original_predictions:
-                    original_correct += original_predictions[primary_label]
-
-                total_processed += 1
-
-                # Print detailed result for this sample
-                print(f"Processed file: {filename}")
-
-            except Exception as e:
-                print(f"Error processing file {filename}: {str(e)}")
-                errors += 1
-                traceback.print_exc()
-
-        # Calculate accuracy
+            # Process results with progress bar
+            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures),
+                               desc="Processing audio files"):
+                orig, denoised, success, filename = future.result()
+                if success:
+                    original_correct += orig
+                    denoised_correct += denoised
+                    total_processed += 1
+                    print(f"Processed file: {filename}")
+                else:
+                    errors += 1
 
         # Print results
         print(f"Results Summary:")
@@ -176,8 +206,10 @@ def calc_dif(denoise_method='emd',
         print("")
 
         return denoised_correct - original_correct
+
     except Exception as e:
         print("Error in calc_dif:", str(e))
+        traceback.print_exc()
         return -10000
 
 
@@ -195,7 +227,7 @@ param_map = {
 }
 
 
-def brute_force():
+def brute_force(max_workers=None):
     # Calculate total number of iterations
     total_iterations = 1
     for param_values in param_map.values():
@@ -236,7 +268,7 @@ def brute_force():
             iter_start = time.time()
 
             # Calculate result for this parameter set
-            result = calc_dif(**params)
+            result = calc_dif(**params, max_workers=max_workers)
 
             # Calculate iteration time
             iter_time = time.time() - iter_start
@@ -293,4 +325,8 @@ if __name__ == "__main__":
     utils.TRAIN_DIR = "/home/mikhail/prj/bc_25_data/train_audio"
     utils.CSV_PATH = "/home/mikhail/prj/bc_25_data/taxonomy.csv"
 
+    # Use default number of workers (CPU count)
     brute_force()
+
+    # Or specify a specific number of workers
+    # brute_force(max_workers=4)

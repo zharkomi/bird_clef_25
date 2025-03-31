@@ -21,11 +21,9 @@ CSV_PATH = "--path-to-your-csv--"
 # BirdNET model loading and prediction functions
 def load_model():
     """Load the BirdNET model from the specified path."""
-    global _interpreter
-    if _interpreter is None:
-        _interpreter = tf.lite.Interpreter(model_path=TFILE)
-        _interpreter.allocate_tensors()
-    return _interpreter
+    interpreter = tf.lite.Interpreter(model_path=TFILE)
+    interpreter.allocate_tensors()
+    return interpreter
 
 
 def predict(interpreter, audio_data, sample_rate=48000):

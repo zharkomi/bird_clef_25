@@ -1,11 +1,16 @@
-import json
 import os
+import threading
 import time
-import pandas as pd
+import gc
+import traceback
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 
-from src import utils
+import pandas as pd
+import tensorflow as tf
+
 from src.audio import parse_file
-from src.birdnet import analyze_audio_fixed_chunks, load_species_data
+from src.birdnet import analyze_audio_fixed_chunks
+from src.birdnet import load_species_data
 from src.utils import load_clef_labels
 from src.wavelet import wavelet_denoise
 
@@ -54,8 +59,6 @@ def predict_denoised(sr, y,
     Args:
         sr: Sample rate
         y: Audio data
-        species_csv_path: Path to species CSV mapping file
-        class_labels: List of class labels required for prediction
         denoise_method: Method for denoising ('emd', 'wavelet', etc.)
         n_noise_layers: Number of noise layers for EMD denoising
         wavelet: Wavelet type for denoising
@@ -92,50 +95,11 @@ def predict_audio(sr, audio):
     return predictions, species_counts
 
 
-def process_all_audio_files(audio_dir, output_path, dir_limit=0):
-    """
-    Process all audio files from a single directory and create predictions.
-
-    Args:
-        audio_dir (str): Directory containing audio files
-        output_path (str): Path to save the output CSV
-        dir_limit (int): Limit on number of files to process (0 = no limit)
-    """
-    load_species_data()
-
-    # Get class labels (column names) from directory
-    # Extract the class labels from the provided labels directory
-    class_labels = load_clef_labels()
-    expected_columns = ['row_id'] + class_labels
-
-    # Prepare results DataFrame
-    predictions_df = pd.DataFrame(columns=expected_columns)
-
-    # Make sure the directory exists
-    if not os.path.isdir(audio_dir):
-        print(f"Warning: Directory {audio_dir} does not exist. Skipping.")
-        return
-
-    # Tracking time metrics
-    total_processing_time = 0
-    total_files = 0
-    count = 0
-
+# Function to process a single audio file
+def process_audio_file(file_path):
     try:
-        # Process each audio file in the directory
-        test_soundscapes = [os.path.join(audio_dir, afile) for afile in
-                            sorted(os.listdir(audio_dir)) if afile.endswith('.ogg')]
-    except Exception as e:
-        print(f"Error listing directory {audio_dir}: {str(e)}. Skipping.")
-        return
-
-    print(f"\n------------------------- Processing directory: {audio_dir}")
-    print(f"Found {len(test_soundscapes)} audio files to process")
-
-    for file_path in test_soundscapes:
-        if 0 < dir_limit <= count:
-            break
-        try:
+        # Create a new TensorFlow graph for this thread
+        with tf.Graph().as_default():
             start_time = time.time()
 
             print(f"\n-------------- Predicting for file: {file_path}")
@@ -147,44 +111,172 @@ def process_all_audio_files(audio_dir, output_path, dir_limit=0):
             # Parse audio file
             sr, y = parse_file(file_path)
 
-            # Get predictions using the new fixed-chunk method
-            # Now returns a list of dictionaries (one per chunk)
+            # Get predictions using the fixed-chunk method
             chunk_predictions, _ = predict_denoised(sr, y)
 
-            # Process each chunk prediction
+            # Create a deep copy of the results to avoid TensorFlow references
+            file_results = []
             for chunk_result in chunk_predictions:
-                # Extract time_end from the chunk result
-                chunk_result['row_id'] = f"{soundscape_id}_{chunk_result['row_id']}"
-                # Add row to DataFrame
-                new_row = pd.DataFrame([chunk_result])
-                predictions_df = pd.concat([predictions_df, new_row], axis=0, ignore_index=True)
+                # Create a new dictionary with copies of all values
+                safe_result = dict(chunk_result)  # Create a copy
+                safe_result['row_id'] = f"{soundscape_id}_{safe_result['row_id']}"
+                file_results.append(safe_result)
 
-            # Calculate and record processing time
+            # Calculate processing time
             end_time = time.time()
             elapsed_time = end_time - start_time
-            total_processing_time += elapsed_time
 
             print(f"Processing time for {filename}: {elapsed_time:.2f} seconds")
-            print(f"Added {len(chunk_predictions)} rows to predictions DataFrame")
+            print(f"Generated {len(chunk_predictions)} chunk predictions")
 
-            total_files += 1
-            count += 1
-        except Exception as e:
-            print(f"Error processing file {file_path}: {str(e)}. Skipping.")
-            continue
+            gc.collect()
 
-    # Calculate average processing time
-    if total_files > 0:
-        avg_time = total_processing_time / total_files
+            return file_results
+    except Exception as e:
+        print(f"Error processing file {file_path}: {str(e)}. Skipping.")
+        traceback.print_exc()
+        # Try to clean up anyway
+        try:
+            tf.keras.backend.clear_session()
+            gc.collect()
+        except:
+            pass
+        return []
+
+
+def process_all_audio_files(audio_dir, output_path, batch_size=4, dir_limit=0,
+                            use_multiprocessing=False):
+    """
+    Process all audio files from a single directory in parallel batches and create predictions.
+
+    Args:
+        audio_dir (str): Directory containing audio files
+        output_path (str): Path to save the output CSV
+        batch_size (int): Number of files to process in each batch
+        dir_limit (int): Limit on number of files to process (0 = no limit)
+        use_multiprocessing (bool): Use multiprocessing instead of threading (better isolation for TensorFlow)
+    """
+    # Configure TensorFlow for better multiprocessing/threading behavior
+    # Limit TensorFlow's resource usage
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        try:
+            # Limit memory growth to avoid OOM errors
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            print(f"GPU memory growth enabled for {len(gpus)} GPUs")
+        except RuntimeError as e:
+            print(f"Error setting GPU memory growth: {e}")
+
+    # Configure threading behavior
+    tf.config.threading.set_inter_op_parallelism_threads(1)
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+
+    # Load required data
+    load_species_data()
+
+    # Get class labels (column names) from directory
+    class_labels = load_clef_labels()
+    expected_columns = ['row_id'] + class_labels
+
+    # Prepare results DataFrame
+    predictions_df = pd.DataFrame(columns=expected_columns)
+    results_lock = threading.Lock()  # Lock for thread-safe DataFrame updates
+
+    # Make sure the directory exists
+    if not os.path.isdir(audio_dir):
+        print(f"Warning: Directory {audio_dir} does not exist. Skipping.")
+        return
+
+    # Get list of audio files
+    try:
+        test_soundscapes = [os.path.join(audio_dir, afile) for afile in
+                            sorted(os.listdir(audio_dir)) if afile.endswith('.ogg')]
+    except Exception as e:
+        print(f"Error listing directory {audio_dir}: {str(e)}. Skipping.")
+        return
+
+    # Apply limit if specified
+    if 0 < dir_limit < len(test_soundscapes):
+        test_soundscapes = test_soundscapes[:dir_limit]
+
+    print(f"\n------------------------- Processing directory: {audio_dir}")
+    print(f"Found {len(test_soundscapes)} audio files to process")
+    print(
+        f"Processing in batches of {batch_size} files parallel {'processes' if use_multiprocessing else 'threads'}")
+
+    # Process files in batches
+    total_processing_time = 0
+    total_files_processed = 0
+
+    # Split files into batches
+    batches = [test_soundscapes[i:i + batch_size] for i in range(0, len(test_soundscapes), batch_size)]
+
+    for batch_num, batch in enumerate(batches):
+        batch_start_time = time.time()
+        print(f"\n------------------------- Processing batch {batch_num + 1}/{len(batches)}")
+
+        batch_results = []
+        files_processed_in_batch = 0
+
+        # Choose executor based on preference (ProcessPoolExecutor provides better isolation)
+        ExecutorClass = ProcessPoolExecutor if use_multiprocessing else ThreadPoolExecutor
+
+        # Process batch in parallel
+        with ExecutorClass(max_workers=batch_size) as executor:
+            # Submit all files in this batch for processing
+            future_to_file = {executor.submit(process_audio_file, file_path): file_path for file_path in batch}
+
+            # Collect results as they complete
+            for future in future_to_file:
+                try:
+                    file_results = future.result()
+                    if file_results:
+                        batch_results.extend(file_results)
+                        files_processed_in_batch += 1
+                except Exception as e:
+                    print(f"Error in parallel execution: {str(e)}")
+
+                # Force garbage collection after each file to free memory
+                gc.collect()
+
+        total_files_processed += files_processed_in_batch
+
+        # Add batch results to the main DataFrame with lock
+        with results_lock:
+            for result in batch_results:
+                new_row = pd.DataFrame([result])
+                predictions_df = pd.concat([predictions_df, new_row], axis=0, ignore_index=True)
+
+        batch_end_time = time.time()
+        batch_time = batch_end_time - batch_start_time
+        total_processing_time += batch_time
+
+        print(f"Batch {batch_num + 1} processing time: {batch_time:.2f} seconds")
+        print(f"Added {len(batch_results)} predictions to DataFrame")
+
+        # Log progress but don't create intermediate files
+        progress_percentage = (batch_num + 1) / len(batches) * 100
+        print(f"Progress: {progress_percentage:.1f}% complete ({batch_num + 1}/{len(batches)} batches)")
+
+        # Clear any lingering TensorFlow state between batches
+        tf.keras.backend.clear_session()
+        gc.collect()
+
+    # Calculate and print summary
+    if total_files_processed > 0:
+        avg_time = total_processing_time / total_files_processed
         print(f"\n------------------------- Processing Summary")
-        print(f"Total files processed: {total_files}")
+        print(f"Total files processed: {total_files_processed}")
         print(f"Average processing time per file: {avg_time:.2f} seconds")
         print(f"Total processing time: {total_processing_time:.2f} seconds")
         print(f"Total prediction rows: {len(predictions_df)}")
 
-    # Save to CSV
+    # Save final results to CSV
     try:
         predictions_df.to_csv(output_path, index=False)
-        print(f"Results saved to {output_path}")
+        print(f"Final results saved to {output_path}")
     except Exception as e:
         print(f"Error saving results to {output_path}: {str(e)}")
+
+    return predictions_df
