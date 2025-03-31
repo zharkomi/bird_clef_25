@@ -1,5 +1,6 @@
-import pandas as pd
-from scipy.special import expit  # This is the logistic sigmoid function
+import os
+
+TRAIN_DIR = "--path-to-your-train-dir--"
 
 
 def split_species_safely(species_str):
@@ -49,3 +50,7 @@ def get_best_prediction(predictions):
     best_species = max(species_durations.items(), key=lambda x: x[1])
 
     return best_species[0]
+
+
+def load_clef_labels():
+    return sorted(os.listdir(TRAIN_DIR))

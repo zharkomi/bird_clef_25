@@ -30,7 +30,7 @@ def aggregate_files(input_files, output_file):
                     imports = import_pattern.findall(content)
 
                     # Filter out imports that start with "src."
-                    filtered_imports = [imp for imp in imports if not imp.startswith('from src.') and not imp.startswith('import src.')]
+                    filtered_imports = [imp for imp in imports if not imp.startswith('from src') and not imp.startswith('import src.')]
 
                     # Add found imports to our collection
                     all_imports.extend(filtered_imports)

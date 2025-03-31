@@ -1,7 +1,12 @@
+import os
+
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import pywt
 from PyEMD import EMD as PyEMD  # Import the EMD implementation
 
-from src.audio import parse_file, save_audio
+from src.audio import save_audio
 
 
 def remove_noise_layers(coeffs, n_layers_to_remove=1, threshold_method='soft', threshold_factor=1.0):
@@ -444,12 +449,6 @@ def plot_wavelet_coeffs(coeffs, denoised_coeffs, noise_coeffs, wavelet, level):
     plt.show()
 
 
-import os
-import pandas as pd
-import pywt
-import numpy as np
-
-
 def generate_config_id(path_to_file, denoise_method, n_noise_layers, wavelet, level,
                        threshold_method, threshold_factor, denoise_strength, preserve_ratio):
     """
@@ -627,20 +626,6 @@ def process_with_emd(y, n_noise_layers, wavelet, level, threshold_method, thresh
     )
     print("EMD+Wavelet denoising completed successfully")
 
-    # Plot IMFs if requested
-    if plot:
-        print("Preparing IMF visualization...")
-
-        # Create denoised IMFs for plotting
-        denoised_imfs = imfs.copy()
-        for i in range(min(n_noise_layers, imfs.shape[0])):
-            denoised_imfs[i] = denoise_imf_with_wavelets(
-                imfs[i], wavelet, level, threshold_method, threshold_factor
-            )
-
-        # Plot original and denoised IMFs
-        plot_imfs(imfs, denoised_imfs, sr, n_noise_layers)
-
     return denoised_signal, noise_signal, imfs
 
 
@@ -732,15 +717,20 @@ def normalize_signal_lengths(y, denoised_signal, noise_signal):
     return y[:min_length], denoised_signal[:min_length], noise_signal[:min_length]
 
 
-def wavelet_denoise(sr, y, denoise_method='dwt', n_noise_layers=2, wavelet='db8', level=5,
-                    threshold_method='soft', threshold_factor=0.9, plot=False,
-                    denoise_strength=0.5, preserve_ratio=0.8, save_csv=False, csv_path=None):
+def wavelet_denoise(sr, y,
+                    denoise_method='dwt',
+                    n_noise_layers=1,
+                    wavelet='db8',
+                    level=6,
+                    threshold_method='soft',
+                    threshold_factor=0.76,
+                    denoise_strength=1.44,
+                    preserve_ratio=0.7):
     """
     Process audio file with wavelet transformation, remove noise, and plot results.
     Can save results to CSV and load from existing CSV if available.
 
     Parameters:
-        path_to_file (str): Path to audio file
         denoise_method (str): Denoising method - 'dwt' for Discrete Wavelet Transform,
                               'wpt' for Wavelet Packet Transform, or 'emd' for
                               Empirical Mode Decomposition + Wavelet
@@ -749,20 +739,19 @@ def wavelet_denoise(sr, y, denoise_method='dwt', n_noise_layers=2, wavelet='db8'
         level (int): Decomposition level (used for dwt and emd methods)
         threshold_method (str): 'soft' or 'hard' thresholding
         threshold_factor (float): Multiplier for threshold calculation (0.5-2.0 typical range)
-        plot (bool): Whether to plot results
         denoise_strength (float): Strength of denoising from 0.0 (none) to 1.0 (full)
         preserve_ratio (float): How much of original signal to blend back in (0.0-1.0)
-        save_csv (bool): Whether to save results to CSV
-        csv_path (str): Path to save/load CSV file. If None, uses path_to_file with .csv extension
 
     Returns:
         tuple: (sr, y, denoised_signal, noise_signal) - Sample rate, original signal,
                denoised signal, and noise signal
+               :param sr:
+               :param denoised_signal:
     """
     # Process using the requested method
     if denoise_method.lower() == 'dwt':
         denoised_signal, noise_signal = process_with_dwt(
-            y, wavelet, level, n_noise_layers, threshold_method, threshold_factor, plot
+            y, wavelet, level, n_noise_layers, threshold_method, threshold_factor
         )
     elif denoise_method.lower() == 'wpt':
         denoised_signal, noise_signal = process_with_wpt(
@@ -771,24 +760,12 @@ def wavelet_denoise(sr, y, denoise_method='dwt', n_noise_layers=2, wavelet='db8'
     elif denoise_method.lower() == 'emd':
         denoised_signal, noise_signal, imfs = process_with_emd(
             y, n_noise_layers, wavelet, level, threshold_method, threshold_factor,
-            denoise_strength, preserve_ratio, plot
+            denoise_strength, preserve_ratio
         )
     else:
         raise ValueError(f"Unknown denoise method: {denoise_method}. Use 'dwt', 'wpt', or 'emd'.")
 
     # Normalize signal lengths
     y, denoised_signal, noise_signal = normalize_signal_lengths(y, denoised_signal, noise_signal)
-
-    # Plot signals if requested
-    if plot:
-        plot_signals(y, denoised_signal, noise_signal, sr, path_to_file, n_noise_layers)
-
-    # Save results to CSV if requested
-    if save_csv:
-        save_results_to_csv(
-            csv_path, config_id, path_to_file, denoise_method, n_noise_layers,
-            wavelet, level, threshold_method, threshold_factor, denoise_strength,
-            preserve_ratio, sr, y, denoised_signal, noise_signal
-        )
 
     return sr, denoised_signal

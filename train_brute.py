@@ -8,8 +8,9 @@ import time
 import traceback
 from datetime import datetime, timedelta
 
+from src import utils
 from src.audio import parse_file
-from src.predict import predict_denoised
+from src.predict import predict_denoised, predict_audio
 
 # Set environment variables before importing any other libraries
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -70,9 +71,6 @@ logging.basicConfig(level=logging.INFO)
 import pandas as pd
 from tqdm import tqdm
 
-from src.birdnet import analyze_audio
-from src.utils import get_best_prediction, split_species_safely
-
 
 def get_data_path():
     """
@@ -99,9 +97,6 @@ def read_df():
 
 DF = read_df()
 
-TFILE = "bn/BirdNET_GLOBAL_6K_V2.4_Model_FP32.tflite"
-LABELS_FILE = "bn/BirdNET_GLOBAL_6K_V2.4_Labels.txt"
-
 
 def calc_dif(denoise_method='emd',
              n_noise_layers=3,
@@ -111,112 +106,79 @@ def calc_dif(denoise_method='emd',
              threshold_factor=0.9,
              denoise_strength=2.0,
              preserve_ratio=0.9):
-    # Check if DataFrame was successfully loaded
-    if DF is None:
-        print("Error: Could not load DataFrame. Exiting.")
-        return
+    try:
+        # Check if DataFrame was successfully loaded
+        if DF is None:
+            print("Error: Could not load DataFrame. Exiting.")
+            return
 
-    # Take a random sample of 100 rows
-    sample_df = DF.sample(n=20, random_state=random.randint(0, 1000))
+        # Take a random sample of 100 rows
+        sample_df = DF.sample(n=20, random_state=random.randint(0, 1000))
 
-    # Initialize counters
-    original_correct = 0
-    denoised_correct = 0
-    total_processed = 0
-    errors = 0
+        # Initialize counters
+        original_correct = 0
+        denoised_correct = 0
+        total_processed = 0
+        errors = 0
 
-    # Check if files exist
-    if not os.path.exists(TFILE):
-        print(f"Error: Model file not found at {TFILE}")
-        return
-    if not os.path.exists(LABELS_FILE):
-        print(f"Error: Labels file not found at {LABELS_FILE}")
-        return
+        for idx, row in tqdm(sample_df.iterrows(), total=len(sample_df), desc="Processing audio files"):
+            filename = row['filename']
+            primary_label = row['primary_label']
 
-    for idx, row in tqdm(sample_df.iterrows(), total=len(sample_df), desc="Processing audio files"):
-        filename = row['filename']
-        scientific_name = row['scientific_name']
-        common_name = row['common_name']
+            # Construct input path
+            input_file = os.path.join(get_data_path(), "train_audio", filename)
 
-        # Construct input path
-        input_file = os.path.join(get_data_path(), "train_audio", filename)
+            if not os.path.exists(input_file):
+                print(f"Error: Input file not found at {input_file}")
+                continue
 
-        if not os.path.exists(input_file):
-            print(f"Error: Input file not found at {input_file}")
-            continue
+            try:
+                # Parse audio file if existing results weren't found
+                sr, y = parse_file(input_file)
 
-        try:
-            # Default values in case no predictions are made
-            orig_scientific, orig_common = "", ""
-            denoised_common, denoised_scientific = "", ""
+                # Process with denoising and get prediction
+                _, denoised_predictions = predict_denoised(sr, y,
+                                                           denoise_method=denoise_method,
+                                                           n_noise_layers=n_noise_layers,
+                                                           wavelet=wavelet,
+                                                           level=level,
+                                                           threshold_method=threshold_method,
+                                                           threshold_factor=threshold_factor,
+                                                           denoise_strength=denoise_strength,
+                                                           preserve_ratio=preserve_ratio
+                                                           )
+                if primary_label in denoised_predictions:
+                    denoised_correct += denoised_predictions[primary_label]
 
-            # Parse audio file if existing results weren't found
-            sr, y = parse_file(input_file)
+                # Analyze original audio
+                _, original_predictions = predict_audio(sr, y)
+                if primary_label in original_predictions:
+                    original_correct += original_predictions[primary_label]
 
-            # Process with denoising and get prediction
-            denoised_predictions = predict_denoised(sr, y,
-                                                    denoise_method=denoise_method,
-                                                    n_noise_layers=n_noise_layers,
-                                                    wavelet=wavelet,
-                                                    level=level,
-                                                    threshold_method=threshold_method,
-                                                    threshold_factor=threshold_factor,
-                                                    denoise_strength=denoise_strength,
-                                                    preserve_ratio=preserve_ratio
-                                                    )
-            if denoised_predictions and len(denoised_predictions) > 0:
-                prediction = get_best_prediction(denoised_predictions)
-                denoised_scientific, denoised_common = split_species_safely(prediction)
-            else:
-                print(f"No predictions for denoised file: {filename}")
+                total_processed += 1
 
-            # Analyze original audio
-            original_predictions = analyze_audio(y, TFILE, LABELS_FILE, sr=sr)
-            if original_predictions and len(original_predictions) > 0:
-                prediction = get_best_prediction(original_predictions)
-                orig_scientific, orig_common = split_species_safely(prediction)
-            else:
-                print(f"No predictions for original file: {filename}")
+                # Print detailed result for this sample
+                print(f"Processed file: {filename}")
 
-            # Check if predictions are correct (case insensitive comparison)
-            if orig_scientific.lower() == scientific_name.lower() or orig_common.lower() == common_name.lower():
-                original_correct += 1
+            except Exception as e:
+                print(f"Error processing file {filename}: {str(e)}")
+                errors += 1
+                traceback.print_exc()
 
-            if denoised_scientific.lower() == scientific_name.lower() or denoised_common.lower() == common_name.lower():
-                denoised_correct += 1
+        # Calculate accuracy
 
-            total_processed += 1
+        # Print results
+        print(f"Results Summary:")
+        print(f"Total files processed: {total_processed}")
+        print(f"Files with errors: {errors}")
+        print(f"Original file accuracy: {original_correct}")
+        print(f"Denoised file accuracy: {denoised_correct}")
+        print("")
 
-            # Print detailed result for this sample
-            print(f"\nFile: {filename}")
-            print(f"True species: {scientific_name} ({common_name})")
-            print(f"Original prediction: {orig_scientific} ({orig_common})")
-            print(f"Denoised prediction: {denoised_scientific} ({denoised_common})")
-
-        except Exception as e:
-            print(f"Error processing file {filename}: {str(e)}")
-            errors += 1
-            traceback.print_exc()
-
-    # Calculate accuracy
-    original_accuracy = original_correct / total_processed if total_processed > 0 else 0
-    denoised_accuracy = denoised_correct / total_processed if total_processed > 0 else 0
-
-    # Print results
-    print(f"\nResults Summary:")
-    print(f"Total files processed: {total_processed}")
-    print(f"Files with errors: {errors}")
-    print(f"Original file accuracy: {original_accuracy:.2%} ({original_correct}/{total_processed})")
-    print(f"Denoised file accuracy: {denoised_accuracy:.2%} ({denoised_correct}/{total_processed})")
-
-    if denoised_accuracy > original_accuracy:
-        print(f"Denoising improved accuracy by {denoised_accuracy - original_accuracy:.2%}")
-    elif denoised_accuracy < original_accuracy:
-        print(f"Denoising reduced accuracy by {original_accuracy - denoised_accuracy:.2%}")
-    else:
-        print("Denoising had no effect on accuracy")
-
-    return denoised_correct - original_correct
+        return denoised_correct - original_correct
+    except Exception as e:
+        print("Error in calc_dif:", str(e))
+        return -10000
 
 
 # Define parameter search space
@@ -328,4 +290,7 @@ def brute_force():
 
 
 if __name__ == "__main__":
+    utils.TRAIN_DIR = "/home/mikhail/prj/bc_25_data/train_audio"
+    utils.CSV_PATH = "/home/mikhail/prj/bc_25_data/taxonomy.csv"
+
     brute_force()

@@ -1,6 +1,10 @@
 import librosa
 import numpy as np
 import tensorflow as tf
+import pandas as pd
+
+from src import utils
+from src.utils import load_clef_labels
 
 # Global variables to store loaded model and labels
 _interpreter = None
@@ -11,6 +15,7 @@ _common_to_id = {}
 
 TFILE = "bn/BirdNET_GLOBAL_6K_V2.4_Model_FP32.tflite"
 LABELS_FILE = "bn/BirdNET_GLOBAL_6K_V2.4_Labels.txt"
+CSV_PATH = "--path-to-your-csv--"
 
 
 # BirdNET model loading and prediction functions
@@ -52,7 +57,7 @@ def predict(interpreter, audio_data, sample_rate=48000):
     return output_data
 
 
-def load_labels():
+def load_birdnet_labels():
     """Load species labels from file."""
     global _labels
     if _labels is None:
@@ -61,7 +66,7 @@ def load_labels():
     return _labels
 
 
-def load_species_data(csv_path):
+def load_species_data():
     """
     Load species data from CSV and create mappings for scientific and common names.
 
@@ -72,18 +77,12 @@ def load_species_data(csv_path):
     - True if successful, False otherwise
     """
     global _species_df, _scientific_to_id, _common_to_id
-
-    try:
-        import pandas as pd
-        _species_df = pd.read_csv(csv_path)
+    if _species_df is None:
+        _species_df = pd.read_csv(CSV_PATH)
         # Create a mapping from scientific name to species ID
         _scientific_to_id = dict(zip(_species_df['scientific_name'].str.lower(), _species_df['primary_label']))
         # Create a mapping from common name to species ID (for species that have common names)
         _common_to_id = dict(zip(_species_df['common_name'].str.lower(), _species_df['primary_label']))
-        return True
-    except Exception as e:
-        print(f"Error loading species data: {e}")
-        return False
 
 
 def split_species_safely(species_full):
@@ -111,7 +110,6 @@ def split_species_safely(species_full):
 
 
 def analyze_audio_fixed_chunks(audio,
-                               species_csv_path, class_labels,
                                chunk_duration=5,
                                sample_rate=32000):
     """
@@ -123,7 +121,6 @@ def analyze_audio_fixed_chunks(audio,
     - model_path: Path to the BirdNET model
     - labels_file: Path to the file containing BirdNET species labels
     - species_csv_path: Path to the CSV file with species mapping information
-    - class_labels: List of class labels required for prediction output
     - chunk_duration: Duration of each chunk in seconds (default: 5)
     - sample_rate: Sample rate of the audio
 
@@ -135,11 +132,11 @@ def analyze_audio_fixed_chunks(audio,
     """
     # Load model and labels
     interpreter = load_model()
-    labels = load_labels()
+    labels = load_birdnet_labels()
+    class_labels = load_clef_labels()
 
     # Load species data if not already loaded
-    if _species_df is None:
-        load_species_data(species_csv_path)
+    load_species_data()
 
     # Ensure correct sample rate for BirdNET
     birdnet_sr = 48000
@@ -204,16 +201,6 @@ def analyze_audio_fixed_chunks(audio,
         # Normalize the row values to sum to 1
         species_values = [chunk_result[species_id] for species_id in class_labels]
         total_sum = sum(species_values)
-
-        # If all values are zero, set each to 1/n
-        if total_sum == 0:
-            num_species = len(class_labels)
-            for species_id in class_labels:
-                chunk_result[species_id] = 1.0 / num_species
-        else:
-            # Normalize non-zero values to sum to 1
-            for species_id in class_labels:
-                chunk_result[species_id] = chunk_result[species_id] / total_sum
 
         # Add result for this chunk
         results.append(chunk_result)

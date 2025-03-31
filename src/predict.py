@@ -3,45 +3,42 @@ import os
 import time
 import pandas as pd
 
+from src import utils
 from src.audio import parse_file
 from src.birdnet import analyze_audio_fixed_chunks, load_species_data
+from src.utils import load_clef_labels
 from src.wavelet import wavelet_denoise
 
 
 def count_species_occurrences(predictions, threshold=0.5):
     """
-    Count how many chunks each species appears in with a probability greater than the threshold.
+    Count occurrences of each species above a threshold.
 
     Args:
-        predictions (list): List of dictionaries from analyze_audio_fixed_chunks
-        threshold (float): Probability threshold for counting an occurrence
+        predictions: List of dictionaries where each dictionary contains species names as keys
+                    and confidence scores as values.
+        threshold: Minimum confidence score to count an occurrence (default: 0.5).
 
     Returns:
-        dict: Dictionary mapping species_id to occurrence count
+        dict: Dictionary mapping species names to their occurrence counts above the threshold.
     """
-    # Initialize count dictionary
     species_counts = {}
 
-    # Extract all possible species IDs from the first prediction (excluding chunk_id and time_end)
-    if predictions and len(predictions) > 0:
-        first_prediction = predictions[0]
-        all_species = [key for key in first_prediction.keys()
-                       if key not in ['chunk_id', 'time_end', 'row_id']]
-
-        # Initialize counts to zero
-        for species in all_species:
-            species_counts[species] = 0
-
-    # Count occurrences above threshold
-    for chunk in predictions:
-        for key, value in chunk.items():
-            if key not in ['chunk_id', 'time_end', 'row_id'] and value > threshold:
-                species_counts[key] = species_counts.get(key, 0) + 1
+    # Iterate through each prediction dictionary
+    for prediction in predictions:
+        # Count keys with values greater than the threshold
+        for species, confidence in prediction.items():
+            if confidence > threshold:
+                # Increment the count for this species
+                if species in species_counts:
+                    species_counts[species] += 1
+                else:
+                    species_counts[species] = 1
 
     return species_counts
 
 
-def predict_denoised(sr, y, species_csv_path, class_labels,
+def predict_denoised(sr, y,
                      denoise_method='emd',
                      n_noise_layers=3,
                      wavelet='db8',
@@ -73,69 +70,43 @@ def predict_denoised(sr, y, species_csv_path, class_labels,
               and probabilities for each species in class_labels
     """
     # Apply wavelet denoising
-    sr, denoised = wavelet_denoise(sr, y,
-                                   denoise_method=denoise_method,
-                                   n_noise_layers=n_noise_layers,
-                                   wavelet=wavelet,
-                                   level=level,
-                                   threshold_method=threshold_method,
-                                   threshold_factor=threshold_factor,
-                                   denoise_strength=denoise_strength,
-                                   preserve_ratio=preserve_ratio
-                                   )
+    sr, denoised = wavelet_denoise(sr, y, denoise_method=denoise_method, n_noise_layers=n_noise_layers, wavelet=wavelet,
+                                   level=level, threshold_method=threshold_method, threshold_factor=threshold_factor,
+                                   denoise_strength=denoise_strength, preserve_ratio=preserve_ratio)
 
+    return predict_audio(sr, denoised)
+
+
+def predict_audio(sr, audio):
     # Process denoised audio with fixed chunk analysis
     predictions = analyze_audio_fixed_chunks(
-        denoised,
-        species_csv_path,
-        class_labels,
+        audio,
         chunk_duration=5,
         sample_rate=sr
     )
-
     print(f"Generated {len(predictions)} chunk predictions")
-
     # Count species occurrences and print results
     species_counts = count_species_occurrences(predictions, threshold=0.5)
     print("Species occurrences with probability > 0.5:")
-    for species, count in sorted(species_counts.items(), key=lambda x: x[1], reverse=True):
-        if count > 0:
-            print(f"  {species}: {count}")
-
-    return predictions
+    print(species_counts)
+    return predictions, species_counts
 
 
-def process_all_audio_files(audio_dir, csv_path, output_path, labels_dir, dir_limit=0):
+def process_all_audio_files(audio_dir, output_path, dir_limit=0):
     """
     Process all audio files from a single directory and create predictions.
 
     Args:
         audio_dir (str): Directory containing audio files
-        csv_path (str): Path to the CSV with species information
         output_path (str): Path to save the output CSV
-        labels_dir (str): Directory to extract class labels from
         dir_limit (int): Limit on number of files to process (0 = no limit)
     """
-    # Load species data
-    try:
-        # Use the new function from birdnet.py to load species data
-        success = load_species_data(csv_path)
-        if not success:
-            print("Failed to load species data. Cannot continue.")
-            return
-    except Exception as e:
-        print(f"Error loading species data: {str(e)}. Skipping.")
-        return
+    load_species_data()
 
     # Get class labels (column names) from directory
-    try:
-        # Extract the class labels from the provided labels directory
-        class_labels = sorted(os.listdir(labels_dir))
-        expected_columns = ['row_id'] + class_labels
-        print(f"Using {len(class_labels)} class labels from directory: {labels_dir}")
-    except Exception as e:
-        print(f"Error getting class labels from directory {labels_dir}: {str(e)}. Cannot continue.")
-        return
+    # Extract the class labels from the provided labels directory
+    class_labels = load_clef_labels()
+    expected_columns = ['row_id'] + class_labels
 
     # Prepare results DataFrame
     predictions_df = pd.DataFrame(columns=expected_columns)
@@ -178,7 +149,7 @@ def process_all_audio_files(audio_dir, csv_path, output_path, labels_dir, dir_li
 
             # Get predictions using the new fixed-chunk method
             # Now returns a list of dictionaries (one per chunk)
-            chunk_predictions = predict_denoised(sr, y, csv_path, class_labels)
+            chunk_predictions, _ = predict_denoised(sr, y)
 
             # Process each chunk prediction
             for chunk_result in chunk_predictions:

@@ -4,15 +4,15 @@ import time
 import csv
 from datetime import datetime, timedelta
 
+from src import utils, birdnet
+from train_brute import calc_dif
 
-# Import your function (assuming it's in a module called 'denoiser')
-# from denoiser import calc_dif
 # Define parameter mappings (from gene values to actual parameter values)
 param_config = {
     'denoise_method': {
         'type': 'categorical',
-        'values': ['emd', 'wavelet'],
-        'gene_range': (0, 1)  # Integer range for gene (will be rounded and used as index)
+        'values': ['dwt', 'wpt', 'emd'],
+        'gene_range': (0, 2)  # Integer range for gene (will be rounded and used as index)
     },
     'n_noise_layers': {
         'type': 'integer',
@@ -20,8 +20,8 @@ param_config = {
     },
     'wavelet': {
         'type': 'categorical',
-        'values': ['db4', 'db8', 'sym8', 'coif3'],
-        'gene_range': (0, 3)  # Integer range for gene (will be rounded and used as index)
+        'values': ['bior4.4', 'dmey', 'db6', 'db4', 'db8', 'sym8', 'coif3'],
+        'gene_range': (0, 6)  # Integer range for gene (will be rounded and used as index)
     },
     'level': {
         'type': 'integer',
@@ -38,7 +38,7 @@ param_config = {
     },
     'denoise_strength': {
         'type': 'float',
-        'range': (1.0, 2.0)  # Min, Max
+        'range': (0.1, 2.0)  # Min, Max
     },
     'preserve_ratio': {
         'type': 'float',
@@ -46,13 +46,23 @@ param_config = {
     }
 }
 
-# Extract gene ranges for PyGAD
-gene_ranges = []
+# Extract gene spaces for PyGAD correctly
+gene_spaces = []
 for param, config in param_config.items():
     if config['type'] == 'categorical':
-        gene_ranges.append(config['gene_range'])
-    else:
-        gene_ranges.append(config['range'])
+        # For categorical, create a list of all possible integer values in the range
+        min_val, max_val = config['gene_range']
+        gene_spaces.append(list(range(min_val, max_val + 1)))
+    elif config['type'] == 'integer':
+        # For integer, create a list of all possible values
+        min_val, max_val = config['range']
+        gene_spaces.append(list(range(min_val, max_val + 1)))
+    else:  # float
+        # For float parameters, create a properly spaced range with many values
+        min_val, max_val = config['range']
+        # Create 100 evenly spaced values in the range
+        values = np.linspace(min_val, max_val, 100).tolist()
+        gene_spaces.append(values)
 
 
 # Function to convert a gene to actual parameter value
@@ -139,6 +149,7 @@ def fitness_func(ga_instance, solution, solution_idx):
         print("Parameters:")
         for k, v in best_solution.items():
             print(f"  {k}: {v}")
+        print("-----------------------------------")
 
     return result
 
@@ -154,7 +165,8 @@ def on_generation(ga_instance):
 
     # Print progress every generation
     if gen % 1 == 0:
-        avg_fitness = np.mean([sol.fitness for sol in ga_instance.population])
+        # Get the fitness values from the population fitness array, not from solution objects
+        avg_fitness = np.mean(ga_instance.last_generation_fitness)
         elapsed_str = str(timedelta(seconds=int(elapsed)))
 
         if gen > 0:
@@ -182,17 +194,20 @@ def main():
 
     # PyGAD parameters
     num_generations = 50
-    num_parents_mating = 10
+    num_parents_mating = 5
     sol_per_pop = 50
     parent_selection_type = "tournament"
     K_tournament = 3
     crossover_type = "single_point"
     mutation_type = "adaptive"
-    mutation_percent_genes = 10
+
+    # FIX: Use a list for mutation_percent_genes
+    # First value is initial mutation rate, second is final mutation rate
+    mutation_percent_genes = [10, 2]  # Start with 10% mutation, end with 2%
 
     # Create real-time evaluation log file
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    eval_log_filename = f"pygad_calc_dif_evals_{timestamp}.csv"
+    eval_log_filename = f"evo/pygad_calc_dif_evals_{timestamp}.csv"
 
     # Open the file for writing
     eval_log_file = open(eval_log_filename, 'w', newline='')
@@ -211,14 +226,15 @@ def main():
         fitness_func=fitness_func,
         sol_per_pop=sol_per_pop,
         num_genes=len(param_config),
-        gene_space=gene_ranges,
+        gene_space=gene_spaces,  # Use the correctly defined gene spaces
         parent_selection_type=parent_selection_type,
         K_tournament=K_tournament,
         crossover_type=crossover_type,
         mutation_type=mutation_type,
         mutation_percent_genes=mutation_percent_genes,
         on_generation=on_generation,
-        save_best_solutions=True
+        save_best_solutions=True,
+        initial_population=None
     )
 
     print("Starting PyGAD optimization for calc_dif")
@@ -300,4 +316,7 @@ def main():
 
 
 if __name__ == "__main__":
+    utils.TRAIN_DIR = "/home/mikhail/prj/bc_25_data/train_audio"
+    birdnet.CSV_PATH = "/home/mikhail/prj/bc_25_data/taxonomy.csv"
+
     main()
