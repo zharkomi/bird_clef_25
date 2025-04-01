@@ -11,6 +11,7 @@ import concurrent.futures
 
 from src import utils
 from src.audio import parse_file
+from src.new_species import SPECIES
 from src.predict import predict_denoised, predict_audio
 
 # Set environment variables before importing any other libraries
@@ -156,8 +157,11 @@ def calc_dif(denoise_method='emd',
             print("Error: Could not load DataFrame. Exiting.")
             return -10000
 
-        # Take a random sample of rows
-        sample_df = DF.sample(n=max_workers, random_state=random.randint(0, 1000))
+        # First filter the DataFrame to exclude rows with row_id in EXCLUDE_LIST
+        filtered_df = DF[~DF['primary_label'].isin(SPECIES)]
+
+        # Then sample from the filtered DataFrame
+        sample_df = filtered_df.sample(n=max_workers, random_state=random.randint(0, 1000))
 
         # Create a dictionary of denoising parameters
         denoise_params = {

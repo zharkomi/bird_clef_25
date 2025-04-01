@@ -12,8 +12,11 @@ from pydub import AudioSegment
 def parse_file(path_to_file):
     # Load and parse OGG file
     print(f"Parsing {path_to_file} ")
-    y, sr = librosa.load(path_to_file, sr=None)
-    return sr, y
+    # y, sr = librosa.load(path_to_file, sr=32000)
+    y = librosa.load(
+        path_to_file, sr=48000, mono=True, res_type="kaiser_fast"
+    )
+    return 48000, y[0]
 
 
 def save_audio(signal, sr, file_path, format):

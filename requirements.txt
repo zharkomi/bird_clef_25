@@ -10,3 +10,4 @@ tensorflow~=2.15.0
 tqdm~=4.67.1
 pygad~=3.2.0
 birdnetlib~=0.18.0
+resampy~=0.4.3

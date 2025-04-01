@@ -1,10 +1,10 @@
 import librosa
 import numpy as np
 import pandas as pd
-from birdnetlib.analyzer import Analyzer
 from birdnetlib import RecordingBuffer
+from birdnetlib.analyzer import Analyzer
+from scipy.interpolate import CubicSpline
 
-from src import utils
 from src.utils import load_clef_labels
 
 # Global variables to store loaded analyzer and labels
@@ -24,8 +24,8 @@ def get_analyzer():
     global _analyzer
     if _analyzer is None:
         _analyzer = Analyzer()
-        _analyzer.model_path = MODEL_PATH
-        _analyzer.load_model()
+        # _analyzer.model_path = MODEL_PATH
+        # _analyzer.load_model()
     return _analyzer
 
 
@@ -92,9 +92,6 @@ def analyze_audio_fixed_chunks(audio,
       - 'row_id': The end time of the chunk in seconds
       - And one key for each species_id with its confidence score
     """
-    # Load analyzer and labels
-    analyzer = get_analyzer()
-    labels = load_birdnet_labels()
     class_labels = load_clef_labels()
 
     # Load species data if not already loaded
@@ -132,20 +129,8 @@ def analyze_audio_fixed_chunks(audio,
         if max_abs_val > 0:
             chunk = chunk / max_abs_val
 
-        # Create a RecordingBuffer object for this chunk
-        # RecordingBuffer is designed to work with raw audio buffers
-        temp_recording = RecordingBuffer(
-            analyzer,
-            buffer=chunk,
-            rate=sample_rate,
-            return_all_detections=True
-        )
-
-        # Process the audio data
-        temp_recording.analyze()
-
         # Get predictions
-        predictions = temp_recording.detections
+        predictions = analyze_chunk(chunk, sample_rate).detections
 
         # Map birdnetlib predictions to our class labels
         # analyze() returns a list of dictionaries with detection details
@@ -157,11 +142,7 @@ def analyze_audio_fixed_chunks(audio,
             confidence = detection['confidence']
 
             # Find matching species ID
-            species_id = None
-            if scientific_name and scientific_name in _scientific_to_id:
-                species_id = _scientific_to_id[scientific_name]
-            elif common_name and common_name in _common_to_id:
-                species_id = _common_to_id[common_name]
+            species_id = get_species_id(common_name, scientific_name)
 
             # Update probability if species is in our class_labels
             if species_id is not None and species_id in class_labels:
@@ -174,3 +155,100 @@ def analyze_audio_fixed_chunks(audio,
         results.append(chunk_result)
 
     return results
+
+
+def get_species_id(common_name, scientific_name):
+    load_species_data()
+    species_id = None
+    if scientific_name and scientific_name.lower() in _scientific_to_id:
+        species_id = _scientific_to_id[scientific_name.lower()]
+    elif common_name and common_name.lower() in _common_to_id:
+        species_id = _common_to_id[common_name.lower()]
+    return species_id
+
+
+def analyze_chunk(chunk, sample_rate):
+    # Create a RecordingBuffer object for this chunk
+    # RecordingBuffer is designed to work with raw audio buffers
+    analyzer = get_analyzer()
+    recording = RecordingBuffer(
+        analyzer,
+        buffer=chunk,
+        rate=sample_rate
+    )
+    # Process the audio data
+    recording.analyze()
+    return recording
+
+
+def analyze_audio(audio, sample_rate):
+    """
+    Analyze audio and return a list of dictionaries with predictions for bird species.
+
+    Parameters:
+    - audio: Audio signal as numpy array
+    - sample_rate: Sample rate of the audio (default: 32000)
+
+    Returns:
+    - List of dictionaries, where each dictionary contains:
+      - 'row_id': The timestamp in seconds
+      - And one key for each species_id with its confidence score
+    """
+    # Ensure correct sample rate for BirdNET
+    # birdnet_sr = 48000
+    # if sample_rate != birdnet_sr:
+    #     audio = librosa.resample(audio, orig_sr=sample_rate, target_sr=birdnet_sr)
+    #     sample_rate = birdnet_sr
+
+    analyzer = get_analyzer()
+    # recording = Recording(analyzer,
+    #                       file_path,
+    #                       min_conf=1e-10
+    #                       )
+    recording = RecordingBuffer(
+        analyzer,
+        buffer=audio,
+        rate=sample_rate,
+        min_conf=1e-10
+    )
+    recording.analyze()
+
+    x1 = np.arange(1.5, 60, 3)
+    x2 = np.arange(2.5, 60, 5)
+
+    # Load class labels
+    class_labels = load_clef_labels()
+
+    # Create a mapping from species ID to index position
+    species_id_to_index = {species_id: idx for idx, species_id in enumerate(class_labels)}
+
+    # Zero-filled resulting array of size [duration // 3; num_species]
+    bn_result = np.zeros((20, len(class_labels)))
+
+    # Fill the result with BirdNet prediction
+    for rec in recording.detections:
+        species_id = get_species_id(rec['common_name'], rec['scientific_name'])
+        if species_id is not None and species_id in species_id_to_index:
+            time_idx = int(rec['start_time'] // 3)
+            species_idx = species_id_to_index[species_id]  # Convert species_id to integer index
+            bn_result[time_idx, species_idx] = rec['confidence']
+
+    # Reshape the resulting array to the size of [duration // 5; num_species]
+    interpolated_result = CubicSpline(x1, bn_result)(x2)
+
+    # Create row_id values
+    row_ids = [n for n in range(5, 65, 5)]
+
+    # Convert to list of dictionaries
+    result_list = []
+    for i, row in enumerate(interpolated_result):
+        # Create a dictionary for this row
+        row_dict = {'row_id': row_ids[i]}
+
+        # Add species confidence scores
+        for j, species_id in enumerate(class_labels):
+            row_dict[species_id] = float(row[j])  # Convert numpy float to Python float
+
+        result_list.append(row_dict)
+
+    return result_list

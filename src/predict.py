@@ -9,13 +9,13 @@ import pandas as pd
 import tensorflow as tf
 
 from src.audio import parse_file
-from src.birdnet import analyze_audio_fixed_chunks
+from src.birdnet import analyze_audio_fixed_chunks, analyze_audio
 from src.birdnet import load_species_data
 from src.utils import load_clef_labels
 from src.wavelet import wavelet_denoise
 
 
-def count_species_occurrences(predictions, threshold=0.5):
+def count_species_occurrences(predictions, threshold=0.1):
     """
     Count occurrences of each species above a threshold.
 
@@ -33,7 +33,7 @@ def count_species_occurrences(predictions, threshold=0.5):
     for prediction in predictions:
         # Count keys with values greater than the threshold
         for species, confidence in prediction.items():
-            if confidence > threshold:
+            if confidence != 0:
                 # Increment the count for this species
                 if species in species_counts:
                     species_counts[species] += 1
@@ -76,21 +76,24 @@ def predict_denoised(sr, y,
     sr, denoised = wavelet_denoise(sr, y, denoise_method=denoise_method, n_noise_layers=n_noise_layers, wavelet=wavelet,
                                    level=level, threshold_method=threshold_method, threshold_factor=threshold_factor,
                                    denoise_strength=denoise_strength, preserve_ratio=preserve_ratio)
-
     return predict_audio(sr, denoised)
 
 
 def predict_audio(sr, audio):
     # Process denoised audio with fixed chunk analysis
-    predictions = analyze_audio_fixed_chunks(
+    # predictions = analyze_audio_fixed_chunks(
+    #     audio,
+    #     chunk_duration=5,
+    #     sample_rate=sr
+    # )
+    predictions = analyze_audio(
         audio,
-        chunk_duration=5,
         sample_rate=sr
     )
     print(f"Generated {len(predictions)} chunk predictions")
     # Count species occurrences and print results
-    species_counts = count_species_occurrences(predictions, threshold=0.5)
-    print("Species occurrences with probability > 0.5:")
+    species_counts = count_species_occurrences(predictions, threshold=0.01)
+    print("Species occurrences:")
     print(species_counts)
     return predictions, species_counts
 
@@ -113,14 +116,13 @@ def process_audio_file(file_path):
 
             # Get predictions using the fixed-chunk method
             chunk_predictions, _ = predict_denoised(sr, y)
+            # chunk_predictions, _ = predict_audio(sr, y, file_path)
 
             # Create a deep copy of the results to avoid TensorFlow references
             file_results = []
             for chunk_result in chunk_predictions:
-                # Create a new dictionary with copies of all values
-                safe_result = dict(chunk_result)  # Create a copy
-                safe_result['row_id'] = f"{soundscape_id}_{safe_result['row_id']}"
-                file_results.append(safe_result)
+                chunk_result['row_id'] = f"{soundscape_id}_{chunk_result['row_id']}"
+                file_results.append(chunk_result)
 
             # Calculate processing time
             end_time = time.time()
