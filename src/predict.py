@@ -1,7 +1,7 @@
+import gc
 import os
 import threading
 import time
-import gc
 import traceback
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 
@@ -144,15 +144,136 @@ def process_audio_file(file_path):
         return []
 
 
-def process_all_audio_files(audio_dir, output_path, batch_size=4, dir_limit=0,
+def process_audio_batch(batch, batch_num, total_batches, batch_size, predictions_df, results_lock,
+                        use_multiprocessing=False):
+    """
+    Process a batch of audio files in parallel and add results to the predictions DataFrame.
+
+    Args:
+        batch (list): List of file paths to process
+        batch_num (int): Current batch number
+        total_batches (int): Total number of batches
+        batch_size (int): Size of the batch
+        predictions_df (pd.DataFrame): DataFrame to store results
+        results_lock (threading.Lock): Lock for thread-safe DataFrame updates
+        use_multiprocessing (bool): Whether to use multiprocessing instead of threading
+
+    Returns:
+        tuple: (batch_time, files_processed_in_batch, updated_df)
+    """
+    batch_start_time = time.time()
+    print(f"\n------------------------- Processing batch {batch_num + 1}/{total_batches}")
+
+    batch_results = []
+    files_processed_in_batch = 0
+
+    # Choose executor based on preference (ProcessPoolExecutor provides better isolation)
+    ExecutorClass = ProcessPoolExecutor if use_multiprocessing else ThreadPoolExecutor
+
+    # Process batch in parallel
+    with ExecutorClass(max_workers=batch_size) as executor:
+        # Submit all files in this batch for processing
+        future_to_file = {executor.submit(process_audio_file, file_path): file_path for file_path in batch}
+
+        # Collect results as they complete
+        for future in future_to_file:
+            try:
+                file_results = future.result()
+                if file_results:
+                    batch_results.extend(file_results)
+                    files_processed_in_batch += 1
+            except Exception as e:
+                print(f"Error in parallel execution: {str(e)}")
+
+            # Force garbage collection after each file to free memory
+            gc.collect()
+
+    # Create updated DataFrame with the new results
+    updated_df = predictions_df
+    if batch_results:
+        batch_df = pd.DataFrame(batch_results)
+        # Only update the DataFrame if there are results
+        with results_lock:
+            updated_df = pd.concat([predictions_df, batch_df], axis=0, ignore_index=True)
+
+    batch_end_time = time.time()
+    batch_time = batch_end_time - batch_start_time
+
+    print(f"Batch {batch_num + 1} processing time: {batch_time:.2f} seconds")
+    print(f"Added {len(batch_results)} predictions to DataFrame")
+
+    # Log progress
+    progress_percentage = (batch_num + 1) / total_batches * 100
+    print(f"Progress: {progress_percentage:.1f}% complete ({batch_num + 1}/{total_batches} batches)")
+
+    # Clear any lingering TensorFlow state between batches
+    tf.keras.backend.clear_session()
+    gc.collect()
+
+    return batch_time, files_processed_in_batch, updated_df
+
+
+def process_audio_sequentially(files, predictions_df, results_lock):
+    """
+    Process audio files sequentially, one at a time.
+
+    Args:
+        files (list): List of file paths to process
+        predictions_df (pd.DataFrame): DataFrame to store results
+        results_lock (threading.Lock): Lock for thread-safe DataFrame updates
+
+    Returns:
+        tuple: (total_processing_time, total_files_processed, updated_df)
+    """
+    total_processing_time = 0
+    total_files_processed = 0
+    updated_df = predictions_df
+
+    print(f"\n------------------------- Processing {len(files)} files sequentially")
+
+    for i, file_path in enumerate(files):
+        file_start_time = time.time()
+
+        try:
+            file_results = process_audio_file(file_path)
+
+            if file_results:
+                # Add results to the DataFrame
+                file_df = pd.DataFrame(file_results)
+                with results_lock:
+                    updated_df = pd.concat([updated_df, file_df], axis=0, ignore_index=True)
+
+                total_files_processed += 1
+
+            file_end_time = time.time()
+            file_time = file_end_time - file_start_time
+            total_processing_time += file_time
+
+            print(f"File {i + 1}/{len(files)} processing time: {file_time:.2f} seconds")
+
+            # Log progress
+            progress_percentage = (i + 1) / len(files) * 100
+            print(f"Progress: {progress_percentage:.1f}% complete ({i + 1}/{len(files)} files)")
+
+        except Exception as e:
+            print(f"Error processing file {file_path}: {str(e)}")
+
+        # Clear TensorFlow state between files
+        tf.keras.backend.clear_session()
+        gc.collect()
+
+    return total_processing_time, total_files_processed, updated_df
+
+
+def process_all_audio_files(audio_dir, output_path, batch_size=-1, dir_limit=0,
                             use_multiprocessing=False):
     """
-    Process all audio files from a single directory in parallel batches and create predictions.
+    Process all audio files from a single directory and create predictions.
 
     Args:
         audio_dir (str): Directory containing audio files
         output_path (str): Path to save the output CSV
-        batch_size (int): Number of files to process in each batch
+        batch_size (int): Number of files to process in each batch (0 or less for sequential processing)
         dir_limit (int): Limit on number of files to process (0 = no limit)
         use_multiprocessing (bool): Use multiprocessing instead of threading (better isolation for TensorFlow)
     """
@@ -202,66 +323,32 @@ def process_all_audio_files(audio_dir, output_path, batch_size=4, dir_limit=0,
 
     print(f"\n------------------------- Processing directory: {audio_dir}")
     print(f"Found {len(test_soundscapes)} audio files to process")
-    print(
-        f"Processing in batches of {batch_size} files parallel {'processes' if use_multiprocessing else 'threads'}")
 
-    # Process files in batches
     total_processing_time = 0
     total_files_processed = 0
 
-    # Split files into batches
-    batches = [test_soundscapes[i:i + batch_size] for i in range(0, len(test_soundscapes), batch_size)]
+    if batch_size <= 0:
+        # Process files sequentially
+        print(f"Processing files sequentially")
+        total_processing_time, total_files_processed, predictions_df = process_audio_sequentially(
+            test_soundscapes, predictions_df, results_lock
+        )
+    else:
+        # Process files in parallel batches
+        print(
+            f"Processing in batches of {batch_size} files parallel {'processes' if use_multiprocessing else 'threads'}")
 
-    for batch_num, batch in enumerate(batches):
-        batch_start_time = time.time()
-        print(f"\n------------------------- Processing batch {batch_num + 1}/{len(batches)}")
+        # Split files into batches
+        batches = [test_soundscapes[i:i + batch_size] for i in range(0, len(test_soundscapes), batch_size)]
 
-        batch_results = []
-        files_processed_in_batch = 0
+        for batch_num, batch in enumerate(batches):
+            batch_time, files_processed, predictions_df = process_audio_batch(
+                batch, batch_num, len(batches), batch_size,
+                predictions_df, results_lock, use_multiprocessing
+            )
 
-        # Choose executor based on preference (ProcessPoolExecutor provides better isolation)
-        ExecutorClass = ProcessPoolExecutor if use_multiprocessing else ThreadPoolExecutor
-
-        # Process batch in parallel
-        with ExecutorClass(max_workers=batch_size) as executor:
-            # Submit all files in this batch for processing
-            future_to_file = {executor.submit(process_audio_file, file_path): file_path for file_path in batch}
-
-            # Collect results as they complete
-            for future in future_to_file:
-                try:
-                    file_results = future.result()
-                    if file_results:
-                        batch_results.extend(file_results)
-                        files_processed_in_batch += 1
-                except Exception as e:
-                    print(f"Error in parallel execution: {str(e)}")
-
-                # Force garbage collection after each file to free memory
-                gc.collect()
-
-        total_files_processed += files_processed_in_batch
-
-        # Add batch results to the main DataFrame with lock
-        with results_lock:
-            for result in batch_results:
-                new_row = pd.DataFrame([result])
-                predictions_df = pd.concat([predictions_df, new_row], axis=0, ignore_index=True)
-
-        batch_end_time = time.time()
-        batch_time = batch_end_time - batch_start_time
-        total_processing_time += batch_time
-
-        print(f"Batch {batch_num + 1} processing time: {batch_time:.2f} seconds")
-        print(f"Added {len(batch_results)} predictions to DataFrame")
-
-        # Log progress but don't create intermediate files
-        progress_percentage = (batch_num + 1) / len(batches) * 100
-        print(f"Progress: {progress_percentage:.1f}% complete ({batch_num + 1}/{len(batches)} batches)")
-
-        # Clear any lingering TensorFlow state between batches
-        tf.keras.backend.clear_session()
-        gc.collect()
+            total_processing_time += batch_time
+            total_files_processed += files_processed
 
     # Calculate and print summary
     if total_files_processed > 0:

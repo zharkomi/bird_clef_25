@@ -7,3 +7,4 @@
 !pip install pydub~=0.25.1
 !pip install scipy~=1.12.0
 !pip install EMD-signal~=1.6.4
+!pip install birdnetlib~=0.18.0
