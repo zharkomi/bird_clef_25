@@ -5,7 +5,7 @@ import csv
 from datetime import datetime, timedelta
 
 from src import utils, birdnet
-from train_brute import calc_dif
+from brute import calc_dif
 
 # Define parameter mappings (from gene values to actual parameter values)
 param_config = {
@@ -233,7 +233,7 @@ def main():
         mutation_type=mutation_type,
         mutation_percent_genes=mutation_percent_genes,
         on_generation=on_generation,
-        save_best_solutions=True,
+        save_best_solutions=False,
         initial_population=None
     )
 

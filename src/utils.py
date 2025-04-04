@@ -1,5 +1,10 @@
 import os
 
+import soundfile as sf
+
+from src.audio import parse_file
+from src.wavelet import wavelet_denoise
+
 TRAIN_DIR = "--path-to-your-train-dir--"
 
 
@@ -54,3 +59,21 @@ def get_best_prediction(predictions):
 
 def load_clef_labels():
     return sorted(os.listdir(TRAIN_DIR))
+
+
+def denoise_and_play(file_path):
+    # Parse audio file
+    sr, y = parse_file(file_path)
+    _, y1 = wavelet_denoise(sr, y,
+                            denoise_method='swt',
+                            n_noise_layers=6,
+                            wavelet='sym5',
+                            level=6,
+                            threshold_method='soft',
+                            threshold_factor=0.75,
+                            denoise_strength=2.0,
+                            preserve_ratio=0.2)
+    denoised_file_path = file_path + ".denoised.wav"
+    sf.write(denoised_file_path, y1, sr, format="wav")
+
+    os.system(f"vlc {file_path} {denoised_file_path}")

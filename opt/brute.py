@@ -134,7 +134,7 @@ def process_file(data):
         _, original_predictions = predict_audio(sr, y)
         original_correct = original_predictions.get(primary_label, 0)
 
-        return original_correct, denoised_correct, True, filename
+        return denoised_correct, original_correct, True, filename
 
     except Exception as e:
         print(f"Error processing file {filename}: {str(e)}")
@@ -142,14 +142,14 @@ def process_file(data):
         return 0, 0, False, filename
 
 
-def calc_dif(denoise_method='emd',
-             n_noise_layers=3,
-             wavelet='db8',
-             level=5,
-             threshold_method='soft',
-             threshold_factor=0.9,
-             denoise_strength=2.0,
-             preserve_ratio=0.9,
+def calc_dif(denoise_method,
+             n_noise_layers,
+             wavelet,
+             level,
+             threshold_method,
+             threshold_factor,
+             denoise_strength,
+             preserve_ratio,
              max_workers=20):  # New parameter for controlling parallelism
     try:
         # Check if DataFrame was successfully loaded

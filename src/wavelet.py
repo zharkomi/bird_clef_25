@@ -717,40 +717,281 @@ def normalize_signal_lengths(y, denoised_signal, noise_signal):
     return y[:min_length], denoised_signal[:min_length], noise_signal[:min_length]
 
 
+def remove_noise_layers_block_thresholding(coeffs, n_layers_to_remove=1, block_size=16, threshold_factor=1.0):
+    """
+    Remove noise from wavelet coefficients using block thresholding
+
+    Parameters:
+        coeffs (list): Wavelet coefficients from wavedec
+        n_layers_to_remove (int): Number of detail coefficient layers to denoise
+        block_size (int): Size of coefficient blocks for thresholding
+        threshold_factor (float): Multiplier for threshold calculation
+
+    Returns:
+        tuple: (denoised_coeffs, noise_coeffs) - Denoised and removed noise coefficients
+    """
+    import numpy as np
+    import pywt
+
+    # Make a copy of coefficients for denoising
+    denoised_coeffs = list(coeffs)
+    noise_coeffs = list(coeffs)
+
+    # Initialize noise coefficients with zeros for approximation coefficients
+    noise_coeffs[0] = np.zeros_like(coeffs[0])
+
+    # Process detail coefficients (starting from highest frequency)
+    for i in range(1, min(n_layers_to_remove + 1, len(coeffs))):
+        detail = coeffs[-i]
+
+        # Skip if coefficients are too few for meaningful blocks
+        if len(detail) < block_size * 2:
+            continue
+
+        # Reshape into blocks (pad if necessary)
+        pad_size = 0
+        if len(detail) % block_size != 0:
+            pad_size = block_size - (len(detail) % block_size)
+            detail_padded = np.pad(detail, (0, pad_size), mode='reflect')
+        else:
+            detail_padded = detail
+
+        # Reshape into blocks
+        n_blocks = len(detail_padded) // block_size
+        blocks = detail_padded.reshape(n_blocks, block_size)
+
+        # Calculate block energies
+        block_energies = np.sum(blocks ** 2, axis=1) / block_size
+
+        # Estimate noise level using median absolute deviation of first detail level
+        # This assumes the first detail level contains mostly noise
+        if i == 1:
+            noise_variance = np.median(np.abs(detail)) / 0.6745
+            noise_variance = noise_variance ** 2
+        else:
+            # For deeper levels, scale the noise estimate
+            noise_variance = noise_variance / (2 ** (i - 1))
+
+        # Calculate threshold for each block based on its energy relative to noise
+        universal_threshold = np.sqrt(2 * np.log(len(detail))) * np.sqrt(noise_variance)
+        threshold = threshold_factor * universal_threshold
+
+        # Apply threshold to blocks based on block energy
+        denoised_blocks = blocks.copy()
+        for j in range(n_blocks):
+            # Block SNR estimation (block energy / noise variance)
+            block_snr = block_energies[j] / noise_variance
+
+            if block_snr > threshold:
+                # If block SNR is high, keep more of the block (attenuate less)
+                attenuation = np.maximum(0, 1 - (threshold ** 2 * noise_variance / block_energies[j]))
+                denoised_blocks[j] = blocks[j] * attenuation
+            else:
+                # If block SNR is low, remove the block completely
+                denoised_blocks[j] = np.zeros_like(blocks[j])
+
+        # Reshape back to original form and remove padding
+        denoised_detail = denoised_blocks.reshape(-1)
+        if pad_size > 0:
+            denoised_detail = denoised_detail[:-pad_size]
+
+        # Store denoised coefficients
+        denoised_coeffs[-i] = denoised_detail
+
+        # Calculate noise that was removed
+        noise_coeffs[-i] = detail - denoised_detail
+
+    # Set the remaining detail coefficients to zero in noise_coeffs
+    for i in range(n_layers_to_remove + 1, len(coeffs)):
+        noise_coeffs[-i] = np.zeros_like(coeffs[-i])
+
+    return denoised_coeffs, noise_coeffs
+
+
+def process_with_block_thresholding(y, wavelet, level, n_noise_layers, block_size, threshold_factor):
+    """
+    Process signal using Discrete Wavelet Transform with Block Thresholding.
+
+    Parameters:
+        y (array): Input signal
+        wavelet (str): Wavelet type
+        level (int): Decomposition level
+        n_noise_layers (int): Number of detail layers to denoise
+        block_size (int): Size of coefficient blocks for thresholding
+        threshold_factor (float): Threshold multiplier
+
+    Returns:
+        tuple: (denoised_signal, noise_signal)
+    """
+    import pywt
+
+    # Apply Discrete Wavelet Transform
+    coeffs = pywt.wavedec(y, wavelet, level=level)
+
+    # Remove noise layers using block thresholding
+    denoised_coeffs, noise_coeffs = remove_noise_layers_block_thresholding(
+        coeffs, n_noise_layers, block_size, threshold_factor
+    )
+
+    # Reconstruct signals
+    denoised_signal = pywt.waverec(denoised_coeffs, wavelet)
+    noise_signal = pywt.waverec(noise_coeffs, wavelet)
+
+    return denoised_signal, noise_signal
+
+
+def remove_noise_layers_swt(coeffs, n_layers_to_remove=1, threshold_method='soft', threshold_factor=1.0):
+    """
+    Remove noise from stationary wavelet coefficients by thresholding detail coefficients
+
+    Parameters:
+        coeffs (list): Stationary wavelet coefficients from swt
+        n_layers_to_remove (int): Number of detail coefficient layers to denoise
+        threshold_method (str): 'soft' or 'hard' thresholding
+        threshold_factor (float): Multiplier for threshold calculation
+
+    Returns:
+        tuple: (denoised_coeffs, noise_coeffs) - Denoised and removed noise coefficients
+    """
+    import numpy as np
+    import pywt
+
+    # Make a copy of coefficients for denoising
+    denoised_coeffs = [list(level) for level in coeffs]
+    noise_coeffs = [list(level) for level in coeffs]
+
+    # Process detail coefficients (each level has [approx, detail] pairs)
+    for i in range(min(n_layers_to_remove, len(coeffs))):
+        # Get the detail coefficients at this level
+        detail = coeffs[i][1]  # [1] index is for detail coefficients
+
+        # Calculate threshold using median absolute deviation
+        threshold = threshold_factor * np.sqrt(2 * np.log(len(detail))) * np.median(np.abs(detail)) / 0.6745
+
+        # Store original detail coefficients in noise_coeffs
+        noise_coeffs[i][1] = detail.copy()
+
+        # Apply thresholding
+        if threshold_method == 'hard':
+            # Hard thresholding: set values below threshold to zero
+            denoised_detail = pywt.threshold(detail, threshold, mode='hard')
+        else:
+            # Soft thresholding: shrink values above threshold
+            denoised_detail = pywt.threshold(detail, threshold, mode='soft')
+
+        # Store denoised detail coefficients
+        denoised_coeffs[i][1] = denoised_detail
+
+        # Calculate noise (what was removed)
+        noise_coeffs[i][1] = detail - denoised_detail
+
+        # Set approximation coefficients to zero in noise and original in denoised
+        noise_coeffs[i][0] = np.zeros_like(coeffs[i][0])
+        denoised_coeffs[i][0] = coeffs[i][0].copy()
+
+    # For levels we're not denoising, set noise to zero and keep original in denoised
+    for i in range(n_layers_to_remove, len(coeffs)):
+        denoised_coeffs[i] = [coeffs[i][0].copy(), coeffs[i][1].copy()]
+        noise_coeffs[i] = [np.zeros_like(coeffs[i][0]), np.zeros_like(coeffs[i][1])]
+
+    return denoised_coeffs, noise_coeffs
+
+
+def process_with_swt(y, wavelet, level, n_noise_layers, threshold_method, threshold_factor):
+    """
+    Process signal using Stationary Wavelet Transform.
+
+    Parameters:
+        y (array): Input signal
+        wavelet (str): Wavelet type
+        level (int): Decomposition level
+        n_noise_layers (int): Number of detail layers to denoise
+        threshold_method (str): Thresholding method
+        threshold_factor (float): Threshold multiplier
+
+    Returns:
+        tuple: (denoised_signal, noise_signal)
+    """
+    import numpy as np
+    import pywt
+
+    # Ensure signal length is sufficient for SWT at this level
+    min_length = 2 ** level
+    if len(y) < min_length:
+        # Pad the signal if needed
+        pad_length = min_length - len(y)
+        y_padded = np.pad(y, (0, pad_length), mode='symmetric')
+    else:
+        # Ensure signal length is a power of 2 for best results
+        next_power_of_2 = 2 ** int(np.ceil(np.log2(len(y))))
+        if len(y) != next_power_of_2:
+            pad_length = next_power_of_2 - len(y)
+            y_padded = np.pad(y, (0, pad_length), mode='symmetric')
+        else:
+            y_padded = y
+
+    original_length = len(y)
+
+    # Apply Stationary Wavelet Transform
+    coeffs = pywt.swt(y_padded, wavelet, level=level)
+
+    # Remove noise layers
+    denoised_coeffs, noise_coeffs = remove_noise_layers_swt(
+        coeffs, n_noise_layers, threshold_method, threshold_factor
+    )
+
+    # Reconstruct signals
+    denoised_signal = pywt.iswt(denoised_coeffs, wavelet)
+    noise_signal = pywt.iswt(noise_coeffs, wavelet)
+
+    # Trim signals back to original length
+    denoised_signal = denoised_signal[:original_length]
+    noise_signal = noise_signal[:original_length]
+
+    return denoised_signal, noise_signal
+
+
 def wavelet_denoise(sr, y,
-                    denoise_method='dwt',
-                    n_noise_layers=1,
-                    wavelet='db8',
+                    denoise_method='swt',
+                    n_noise_layers=6,
+                    wavelet='sym5',
                     level=6,
                     threshold_method='soft',
-                    threshold_factor=0.76,
-                    denoise_strength=1.44,
-                    preserve_ratio=0.7):
+                    threshold_factor=0.75,
+                    denoise_strength=2.0,
+                    preserve_ratio=0.2,
+                    block_size=32):
     """
     Process audio file with wavelet transformation, remove noise, and plot results.
     Can save results to CSV and load from existing CSV if available.
 
     Parameters:
+        sr (int): Sample rate of the audio
+        y (numpy.ndarray): Input audio signal
         denoise_method (str): Denoising method - 'dwt' for Discrete Wavelet Transform,
-                              'wpt' for Wavelet Packet Transform, or 'emd' for
-                              Empirical Mode Decomposition + Wavelet
+                              'swt' for Stationary Wavelet Transform,
+                              'wpt' for Wavelet Packet Transform,
+                              'emd' for Empirical Mode Decomposition + Wavelet, or
+                              'block' for Block Thresholding Wavelet
         n_noise_layers (int): Number of detail coefficient layers to denoise (or IMFs for EMD)
         wavelet (str): Wavelet type to use
-        level (int): Decomposition level (used for dwt and emd methods)
-        threshold_method (str): 'soft' or 'hard' thresholding
+        level (int): Decomposition level (used for dwt, swt, emd, and block methods)
+        threshold_method (str): 'soft' or 'hard' thresholding (not used with block method)
         threshold_factor (float): Multiplier for threshold calculation (0.5-2.0 typical range)
         denoise_strength (float): Strength of denoising from 0.0 (none) to 1.0 (full)
         preserve_ratio (float): How much of original signal to blend back in (0.0-1.0)
+        block_size (int): Size of coefficient blocks for block thresholding (8-32 typical range)
 
     Returns:
-        tuple: (sr, y, denoised_signal, noise_signal) - Sample rate, original signal,
-               denoised signal, and noise signal
-               :param sr:
-               :param denoised_signal:
+        tuple: (sr, denoised_signal) - Sample rate and denoised signal
     """
     # Process using the requested method
     if denoise_method.lower() == 'dwt':
         denoised_signal, noise_signal = process_with_dwt(
+            y, wavelet, level, n_noise_layers, threshold_method, threshold_factor
+        )
+    elif denoise_method.lower() == 'swt':  # Added SWT method
+        denoised_signal, noise_signal = process_with_swt(
             y, wavelet, level, n_noise_layers, threshold_method, threshold_factor
         )
     elif denoise_method.lower() == 'wpt':
@@ -762,10 +1003,21 @@ def wavelet_denoise(sr, y,
             y, n_noise_layers, wavelet, level, threshold_method, threshold_factor,
             denoise_strength, preserve_ratio
         )
+    elif denoise_method.lower() == 'block':
+        # Use the block thresholding method
+        denoised_signal, noise_signal = process_with_block_thresholding(
+            y, wavelet, level, n_noise_layers, block_size, threshold_factor
+        )
     else:
-        raise ValueError(f"Unknown denoise method: {denoise_method}. Use 'dwt', 'wpt', or 'emd'.")
+        raise ValueError(f"Unknown denoise method: {denoise_method}. Use 'dwt', 'swt', 'wpt', 'emd', or 'block'.")
 
     # Normalize signal lengths
     y, denoised_signal, noise_signal = normalize_signal_lengths(y, denoised_signal, noise_signal)
+
+    # Apply blending with original signal based on preserve_ratio
+    # (Not applying to 'emd' since it already does this internally)
+    if denoise_method.lower() != 'emd' and preserve_ratio > 0:
+        denoised_signal = denoised_signal * (1 - preserve_ratio) + y * preserve_ratio
+        noise_signal = y - denoised_signal
 
     return sr, denoised_signal

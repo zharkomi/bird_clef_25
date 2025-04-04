@@ -48,7 +48,7 @@ def find_missing_species(labels_file, taxonomy_file):
 
 # Main execution
 if __name__ == "__main__":
-    LABELS_FILE = "bn/BirdNET_GLOBAL_6K_V2.4_Labels.txt"
+    LABELS_FILE = "../bn/BirdNET_GLOBAL_6K_V2.4_Labels.txt"
     CSV_PATH = "/home/mikhail/prj/bc_25_data/taxonomy.csv"
 
     missing = find_missing_species(LABELS_FILE, CSV_PATH)
@@ -60,7 +60,7 @@ if __name__ == "__main__":
             f"\"{species['primary_label']}\",")
 
     # Option to save results to a file
-    with open("missing_species.csv", "w", newline="", encoding="utf-8") as f:
+    with open("../missing_species.csv", "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["primary_label", "scientific_name", "common_name"])
         writer.writeheader()
         writer.writerows(missing)

@@ -184,6 +184,7 @@ def analyze_chunk(chunk, sample_rate):
 def analyze_audio(audio, sample_rate):
     """
     Analyze audio and return a list of dictionaries with predictions for bird species.
+    Always returns a number of rows equal to the number of 5-second chunks in the audio.
 
     Parameters:
     - audio: Audio signal as numpy array
@@ -191,7 +192,7 @@ def analyze_audio(audio, sample_rate):
 
     Returns:
     - List of dictionaries, where each dictionary contains:
-      - 'row_id': The timestamp in seconds
+      - 'row_id': The timestamp in seconds (5, 10, 15, etc.)
       - And one key for each species_id with its confidence score
     """
     # Ensure correct sample rate for BirdNET
@@ -201,10 +202,6 @@ def analyze_audio(audio, sample_rate):
     #     sample_rate = birdnet_sr
 
     analyzer = get_analyzer()
-    # recording = Recording(analyzer,
-    #                       file_path,
-    #                       min_conf=1e-10
-    #                       )
     recording = RecordingBuffer(
         analyzer,
         buffer=audio,
@@ -213,8 +210,32 @@ def analyze_audio(audio, sample_rate):
     )
     recording.analyze()
 
-    x1 = np.arange(1.5, 60, 3)
-    x2 = np.arange(2.5, 60, 5)
+    # Calculate total audio duration and number of chunks
+    num_seconds = int(len(audio) / sample_rate)
+    num_5sec_chunks = (num_seconds + 4) // 5  # Ceiling division to include partial chunks
+
+    # Define the time points for BirdNET 3-second chunks and our 5-second output chunks
+    x1 = np.arange(1.5, num_seconds, 3)
+    x2 = np.arange(2.5, num_seconds, 5)
+
+    # Ensure x2 has at least one point (for very short audio)
+    if len(x2) == 0 and num_seconds > 0:
+        x2 = np.array([2.5])
+
+    # Create row_ids for the final output
+    row_ids = [n for n in range(5, num_5sec_chunks * 5 + 5, 5)]
+
+    # If no chunks (extremely short audio), return empty list with proper structure
+    if len(x2) == 0:
+        # Load class labels
+        class_labels = load_clef_labels()
+        empty_result = []
+        for i in range(max(1, num_5sec_chunks)):
+            row_dict = {'row_id': 5 * (i + 1)}
+            for species_id in class_labels:
+                row_dict[species_id] = 0.0
+            empty_result.append(row_dict)
+        return empty_result
 
     # Load class labels
     class_labels = load_clef_labels()
@@ -222,22 +243,59 @@ def analyze_audio(audio, sample_rate):
     # Create a mapping from species ID to index position
     species_id_to_index = {species_id: idx for idx, species_id in enumerate(class_labels)}
 
-    # Zero-filled resulting array of size [duration // 3; num_species]
-    bn_result = np.zeros((20, len(class_labels)))
+    # Calculate required size for intermediate results array
+    required_3sec_chunks = int(np.ceil(num_seconds / 3))
+
+    # Create zero-filled array for all possible 3-second chunks
+    bn_result = np.zeros((required_3sec_chunks, len(class_labels)))
 
     # Fill the result with BirdNet prediction
     for rec in recording.detections:
         species_id = get_species_id(rec['common_name'], rec['scientific_name'])
         if species_id is not None and species_id in species_id_to_index:
             time_idx = int(rec['start_time'] // 3)
-            species_idx = species_id_to_index[species_id]  # Convert species_id to integer index
+            # Skip if time_idx is out of bounds
+            if time_idx >= required_3sec_chunks:
+                continue
+            species_idx = species_id_to_index[species_id]
             bn_result[time_idx, species_idx] = rec['confidence']
 
-    # Reshape the resulting array to the size of [duration // 5; num_species]
-    interpolated_result = CubicSpline(x1, bn_result)(x2)
+    # Create x1 array matching the full bn_result size
+    x1_full = np.arange(1.5, required_3sec_chunks * 3, 3)
 
-    # Create row_id values
-    row_ids = [n for n in range(5, 65, 5)]
+    # Ensure we have matching sizes between x1_full and bn_result
+    if len(x1_full) > bn_result.shape[0]:
+        x1_full = x1_full[:bn_result.shape[0]]
+    elif len(x1_full) < bn_result.shape[0]:
+        bn_result = bn_result[:len(x1_full)]
+
+    # Ensure we have at least one point for interpolation
+    if len(x1_full) == 0:
+        x1_full = np.array([1.5])
+        bn_result = np.zeros((1, len(class_labels)))
+
+    try:
+        # Interpolate to 5-second chunks
+        interpolated_result = CubicSpline(x1_full, bn_result, extrapolate=True)(x2)
+    except Exception as e:
+        print(f"Interpolation error: {e}")
+        print(f"x1_full shape: {x1_full.shape}, bn_result shape: {bn_result.shape}, x2 shape: {x2.shape}")
+        # Return zeros if interpolation fails
+        interpolated_result = np.zeros((len(x2), len(class_labels)))
+
+    # Ensure we have the right number of results
+    if len(interpolated_result) < num_5sec_chunks:
+        # Pad with zeros if we don't have enough results
+        padding = np.zeros((num_5sec_chunks - len(interpolated_result), len(class_labels)))
+        interpolated_result = np.vstack([interpolated_result, padding])
+    elif len(interpolated_result) > num_5sec_chunks:
+        # Truncate if we have too many results
+        interpolated_result = interpolated_result[:num_5sec_chunks]
+
+    # Ensure row_ids matches the interpolated result size
+    row_ids = row_ids[:len(interpolated_result)]
+    while len(row_ids) < len(interpolated_result):
+        row_ids.append(row_ids[-1] + 5)
 
     # Convert to list of dictionaries
     result_list = []

@@ -15,14 +15,13 @@ from src.utils import load_clef_labels
 from src.wavelet import wavelet_denoise
 
 
-def count_species_occurrences(predictions, threshold=0.1):
+def calc_species_stat(predictions):
     """
     Count occurrences of each species above a threshold.
 
     Args:
         predictions: List of dictionaries where each dictionary contains species names as keys
                     and confidence scores as values.
-        threshold: Minimum confidence score to count an occurrence (default: 0.5).
 
     Returns:
         dict: Dictionary mapping species names to their occurrence counts above the threshold.
@@ -33,25 +32,21 @@ def count_species_occurrences(predictions, threshold=0.1):
     for prediction in predictions:
         # Count keys with values greater than the threshold
         for species, confidence in prediction.items():
-            if confidence != 0:
-                # Increment the count for this species
-                if species in species_counts:
-                    species_counts[species] += 1
-                else:
-                    species_counts[species] = 1
+            if isinstance(confidence, float):
+                species_counts[species] = species_counts.get(species, 0.0) + confidence
 
     return species_counts
 
 
 def predict_denoised(sr, y,
-                     denoise_method='emd',
+                     denoise_method='dwt',
                      n_noise_layers=3,
-                     wavelet='db8',
-                     level=5,
+                     wavelet='coif3',
+                     level=2,
                      threshold_method='soft',
-                     threshold_factor=0.9,
-                     denoise_strength=2.0,
-                     preserve_ratio=0.9
+                     threshold_factor=0.65,
+                     denoise_strength=0.73,
+                     preserve_ratio=0.83
                      ):
     """
     Analyze an audio file with wavelet denoising using fixed-chunk processing.
@@ -80,22 +75,16 @@ def predict_denoised(sr, y,
 
 
 def predict_audio(sr, audio):
-    # Process denoised audio with fixed chunk analysis
-    # predictions = analyze_audio_fixed_chunks(
-    #     audio,
-    #     chunk_duration=5,
-    #     sample_rate=sr
-    # )
     predictions = analyze_audio(
         audio,
         sample_rate=sr
     )
     print(f"Generated {len(predictions)} chunk predictions")
     # Count species occurrences and print results
-    species_counts = count_species_occurrences(predictions, threshold=0.01)
+    species_stat = calc_species_stat(predictions)
     print("Species occurrences:")
-    print(species_counts)
-    return predictions, species_counts
+    print(species_stat)
+    return predictions, species_stat
 
 
 # Function to process a single audio file
@@ -116,7 +105,7 @@ def process_audio_file(file_path):
 
             # Get predictions using the fixed-chunk method
             chunk_predictions, _ = predict_denoised(sr, y)
-            # chunk_predictions, _ = predict_audio(sr, y, file_path)
+            # chunk_predictions, _ = predict_audio(sr, y)
 
             # Create a deep copy of the results to avoid TensorFlow references
             file_results = []
