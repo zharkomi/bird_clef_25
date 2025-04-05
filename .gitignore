@@ -178,3 +178,5 @@ submission.csv
 bn/*
 evo/*
 .idea/*
+train_*_*/*
+embeddings/*

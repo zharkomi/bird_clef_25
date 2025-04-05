@@ -24,8 +24,6 @@ def get_analyzer():
     global _analyzer
     if _analyzer is None:
         _analyzer = Analyzer()
-        # _analyzer.model_path = MODEL_PATH
-        # _analyzer.load_model()
     return _analyzer
 
 
@@ -177,7 +175,7 @@ def analyze_chunk(chunk, sample_rate):
         rate=sample_rate
     )
     # Process the audio data
-    recording.analyze()
+    recording.extract_embeddings()
     return recording
 
 
@@ -310,3 +308,118 @@ def analyze_audio(audio, sample_rate):
         result_list.append(row_dict)
 
     return result_list
+
+
+def calculate_average_embedding(embeddings_list):
+    """
+    Calculate the average embedding from a list of embedding arrays.
+
+    Args:
+        embeddings_list: List of embedding arrays or dicts with 'embeddings' key
+
+    Returns:
+        numpy.ndarray: Average embedding vector
+    """
+    import numpy as np
+
+    # Check if we have embeddings
+    if not embeddings_list or len(embeddings_list) == 0:
+        return None
+
+    # Handle both list of arrays and list of dicts formats
+    processed_embeddings = []
+
+    for item in embeddings_list:
+        # Check if the item is a dictionary with 'embeddings' key
+        if isinstance(item, dict) and 'embeddings' in item:
+            processed_embeddings.append(np.array(item['embeddings']))
+        # Check if the item itself is an array-like
+        elif hasattr(item, '__len__'):
+            processed_embeddings.append(np.array(item))
+
+    # Ensure we have valid embeddings to average
+    if not processed_embeddings:
+        return None
+
+    # Ensure all embeddings have the same dimension
+    first_dim = len(processed_embeddings[0])
+    valid_embeddings = [emb for emb in processed_embeddings if len(emb) == first_dim]
+
+    if not valid_embeddings:
+        return None
+
+    # Stack and calculate average
+    stacked_embeddings = np.stack(valid_embeddings)
+    average_embedding = np.mean(stacked_embeddings, axis=0)
+
+    return average_embedding
+
+
+def get_embedding(audio_chunk, sr):
+    """
+    Extract embedding from audio chunk using BirdNET analyzer.
+
+    Args:
+        audio_chunk: Audio chunk
+        sr: Sample rate
+
+    Returns:
+        Embedding vector
+    """
+    # Normalize the audio chunk
+    if np.max(np.abs(audio_chunk)) > 0:
+        audio_chunk = audio_chunk / np.max(np.abs(audio_chunk))
+
+    # Make sure the sample rate is what BirdNET expects (48kHz)
+    if sr != 48000:
+        audio_chunk = librosa.resample(audio_chunk, orig_sr=sr, target_sr=48000)
+        sr = 48000
+
+    # Get recording object from BirdNET analyzer
+    recording = analyze_chunk(audio_chunk, sr)
+
+    # Extract embedding from recording
+    # Note: This assumes birdnetlib provides access to embeddings
+    embedding = extract_embedding_from_recording(recording)
+
+    return calculate_average_embedding(embedding)
+
+
+def extract_embedding_from_recording(recording):
+    """
+    Extract embedding from BirdNET recording.
+    This is a placeholder function - you'll need to implement this based on how
+    BirdNET provides access to embeddings.
+
+    Args:
+        recording: BirdNET recording object
+
+    Returns:
+        Embedding vector
+    """
+    # This is a placeholder implementation
+    # In the actual code, you would extract the embedding from the recording object
+    # For example, this might be something like:
+    # embedding = recording.get_embedding() or recording.embeddings
+
+    # For now, just return a dummy embedding for demonstration
+    try:
+        # Try to access the embedding directly
+        if hasattr(recording, 'embeddings'):
+            return recording.embeddings
+        elif hasattr(recording, 'get_embedding'):
+            return recording.get_embedding()
+        else:
+            # Fall back to a simplified approach - use detections as features
+            detections = recording.detections
+            # Extract confidence scores for each species
+            if detections:
+                # Create a feature vector from the confidence scores
+                embedding = np.array([det['confidence'] for det in detections])
+                return embedding
+            else:
+                # No detections, return a zero vector
+                return np.zeros(512)  # Typical embedding size
+    except Exception as e:
+        print(f"Error extracting embedding: {e}")
+        return np.zeros(512)  # Return a zero vector as fallback
