@@ -4,7 +4,9 @@ import pandas as pd
 from birdnetlib import RecordingBuffer
 from birdnetlib.analyzer import Analyzer
 from scipy.interpolate import CubicSpline
+from scipy.special import softmax
 
+from src.embeddings import predict_species_probabilities
 from src.utils import load_clef_labels
 
 # Global variables to store loaded analyzer and labels
@@ -47,6 +49,30 @@ def load_species_data():
         _scientific_to_id = dict(zip(_species_df['scientific_name'].str.lower(), _species_df['primary_label']))
         # Create a mapping from common name to species ID (for species that have common names)
         _common_to_id = dict(zip(_species_df['common_name'].str.lower(), _species_df['primary_label']))
+
+
+def confidence_to_probability(confidences):
+    """
+    Convert confidence scores to probabilities using softmax.
+
+    Parameters:
+    - confidences: Array of confidence scores
+
+    Returns:
+    - Array of probabilities that sum to 1.0
+    """
+    # Add a small epsilon to avoid log(0)
+    epsilon = 1e-10
+
+    # Apply softmax to convert confidences to probabilities
+    # First, ensure all values are non-negative (softmax works with any values, but
+    # we want to ensure that zero confidences map to very low probabilities)
+    adjusted_confidences = np.maximum(confidences, epsilon)
+
+    # Apply softmax
+    probs = softmax(adjusted_confidences)
+
+    return probs
 
 
 def split_species_safely(species_full):
@@ -199,13 +225,17 @@ def analyze_audio(audio, sample_rate):
     #     audio = librosa.resample(audio, orig_sr=sample_rate, target_sr=birdnet_sr)
     #     sample_rate = birdnet_sr
 
+    # Define minimum confidence threshold - use the same as in RecordingBuffer
+    min_conf = 1e-10
+
     analyzer = get_analyzer()
     recording = RecordingBuffer(
         analyzer,
         buffer=audio,
         rate=sample_rate,
-        min_conf=1e-10
+        min_conf=min_conf
     )
+    recording.extract_embeddings()
     recording.analyze()
 
     # Calculate total audio duration and number of chunks
@@ -257,6 +287,31 @@ def analyze_audio(audio, sample_rate):
                 continue
             species_idx = species_id_to_index[species_id]
             bn_result[time_idx, species_idx] = rec['confidence']
+
+    # Process embeddings and integrate their predictions into bn_result
+    for emb in recording.embeddings:
+        # Get time index for this embedding
+        time_idx = int(emb['start_time'] // 3)
+
+        # Skip if time_idx is out of bounds
+        if time_idx >= required_3sec_chunks:
+            continue
+
+        # Get predictions from embeddings with the same min_conf threshold
+        species_predictions = predict_species_probabilities(emb['embeddings'])
+
+        # Map species predictions to bn_result
+        for species_name, prob in species_predictions.items():
+            # Skip very low probability predictions based on min_conf
+            if prob < min_conf:
+                continue
+            species_idx = species_id_to_index[species_name]
+            # Update bn_result with the maximum confidence between existing and new prediction
+            bn_result[time_idx, species_idx] = max(bn_result[time_idx, species_idx], prob)
+
+    # Convert raw confidence scores to probabilities using softmax for each time step
+    # for i in range(bn_result.shape[0]):
+    #    bn_result[i] = confidence_to_probability(bn_result[i])
 
     # Create x1 array matching the full bn_result size
     x1_full = np.arange(1.5, required_3sec_chunks * 3, 3)

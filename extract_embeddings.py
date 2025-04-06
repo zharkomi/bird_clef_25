@@ -1,151 +1,236 @@
 import os
-import numpy as np
-import librosa
 import pickle
-from birdnetlib import Recording
-from birdnetlib.analyzer import Analyzer
-from birdnetlib import RecordingBuffer
+import numpy as np
+import pandas as pd
 from tqdm import tqdm
-import glob
+import librosa
+import soundfile as sf
 
-# Path to your audio files
-AUDIO_DIR = '/home/mikhail/prj/bc_25_data/train_audio'
-
-# Output directory for embeddings
-OUTPUT_DIR = '/home/mikhail/prj/bird_clef_25/embeddings'
-
-# Create output directory if it doesn't exist
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+from src.audio import parse_file
+from src.birdnet import get_analyzer, analyze_chunk, get_embedding
+from src.new_species import SPECIES
 
 
-# Function to get BirdNET analyzer instance
-def get_analyzer():
-    # Initialize the analyzer with default settings
-    # The BirdNET model expects 48kHz audio
-    return Analyzer(sampling_rate=48000)
+def load_voice_data(pkl_path="/home/mikhail/prj/bird_clef_25/data/train_voice_data.pkl"):
+    """
+    Load the pickle file containing human voice segments.
+
+    Args:
+        pkl_path: Path to the pickle file
+
+    Returns:
+        Dictionary mapping filenames to voice segments
+    """
+    with open(pkl_path, 'rb') as f:
+        voice_data = pickle.load(f)
+
+    print(f"Loaded voice data for {len(voice_data)} files")
+    return voice_data
 
 
-# Function to analyze audio chunk and get embeddings
-def analyze_chunk(chunk, sample_rate):
-    # Create a RecordingBuffer object for this chunk
-    # RecordingBuffer is designed to work with raw audio buffers
-    analyzer = get_analyzer()
-    recording = RecordingBuffer(
-        analyzer,
-        buffer=chunk,
-        rate=sample_rate,
-        return_all_detections=True
-    )
-    # Process the audio data
-    recording.analyze()
-    return recording
+def remove_voice_segments(audio, sr, voice_segments):
+    """
+    Remove human voice segments from the audio by completely removing those parts
+    rather than replacing with silence.
+
+    Args:
+        audio: Audio array
+        sr: Sample rate
+        voice_segments: List of dictionaries with 'start' and 'end' keys in seconds
+
+    Returns:
+        Audio with voice segments completely removed
+    """
+    # Sort voice segments by start time to ensure proper processing
+    sorted_segments = sorted(voice_segments, key=lambda x: x['start'])
+
+    # Initialize the result with an empty array
+    result_audio = np.array([], dtype=audio.dtype)
+    last_end = 0
+
+    # Process each segment
+    for segment in sorted_segments:
+        start_time = segment['start']
+        end_time = segment['end']
+
+        # Convert time to samples
+        start_sample = int(start_time * sr)
+        end_sample = int(end_time * sr)
+
+        # Ensure indices are within bounds
+        start_sample = max(0, min(start_sample, len(audio) - 1))
+        end_sample = max(0, min(end_sample, len(audio) - 1))
+
+        # Add the audio segment before this voice segment
+        if start_sample > last_end:
+            result_audio = np.concatenate([result_audio, audio[last_end:start_sample]])
+
+        # Update the last ending position
+        last_end = end_sample
+
+    # Add the final segment after the last voice segment
+    if last_end < len(audio):
+        result_audio = np.concatenate([result_audio, audio[last_end:]])
+
+    return result_audio
 
 
-# Function to extract embeddings from an audio file
-def extract_embeddings(audio_path):
-    try:
-        # Load audio file at original sample rate
-        audio, sr = librosa.load(audio_path, sr=None)
+def split_into_chunks(audio, sr, chunk_duration=3.0, overlap=1.5):
+    """
+    Split audio into overlapping chunks of specified duration.
 
-        # Resample to 48000 Hz (BirdNET requirement)
-        if sr != 48000:
-            audio = librosa.resample(audio, orig_sr=sr, target_sr=48000)
-            sr = 48000
+    Args:
+        audio: Audio array
+        sr: Sample rate
+        chunk_duration: Duration of each chunk in seconds
+        overlap: Overlap between chunks in seconds
 
-        # Calculate chunk size in samples (5 seconds * sample rate)
-        chunk_size = 5 * sr
+    Returns:
+        List of audio chunks
+    """
+    # Calculate parameters in samples
+    chunk_size = int(chunk_duration * sr)
+    hop_size = int((chunk_duration - overlap) * sr)
 
-        # Get total number of complete chunks
-        num_chunks = len(audio) // chunk_size
+    # Calculate number of chunks
+    num_chunks = max(1, 1 + int((len(audio) - chunk_size) / hop_size))
 
-        # Storage for embeddings from all chunks
-        all_embeddings = []
+    chunks = []
+    for i in range(num_chunks):
+        start = i * hop_size
+        end = start + chunk_size
 
-        # Process each 5-second chunk
-        for i in range(num_chunks):
-            # Extract the chunk
-            start_idx = i * chunk_size
-            end_idx = start_idx + chunk_size
-            chunk = audio[start_idx:end_idx]
+        # If last chunk, handle potential boundary issues
+        if end > len(audio):
+            # Pad with zeros if needed
+            chunk = np.zeros(chunk_size)
+            chunk[:len(audio) - start] = audio[start:]
+        else:
+            chunk = audio[start:end]
 
-            # Analyze the chunk
-            recording = analyze_chunk(chunk, sr)
+        # Only add chunks that have sufficient non-zero content
+        if np.count_nonzero(chunk) > 0.1 * len(chunk):
+            chunks.append(chunk)
 
-            # Get embeddings from the recording
-            # Note: This assumes that birdnetlib RecordingBuffer provides access to embeddings
-            chunk_embeddings = recording.embeddings
-
-            # Store embeddings if valid
-            if chunk_embeddings is not None and len(chunk_embeddings) > 0:
-                all_embeddings.append(chunk_embeddings)
-
-        # If no embeddings were extracted from any chunk, return None
-        if not all_embeddings:
-            print(f"Warning: No embeddings extracted for {audio_path}")
-            return None
-
-        # Flatten list of embeddings from all chunks
-        flat_embeddings = np.vstack(all_embeddings)
-
-        return flat_embeddings
-
-    except Exception as e:
-        print(f"Error processing {audio_path}: {e}")
-        return None
+    return chunks
 
 
-def process_species_directory(species_id):
-    """Process all audio files for a given species"""
-    species_dir = os.path.join(AUDIO_DIR, species_id)
-    output_species_dir = os.path.join(OUTPUT_DIR, species_id)
+def process_species_audio(species_list=SPECIES,
+                          train_dir="/home/mikhail/prj/bc_25_data/train_audio",
+                          output_dir="/home/mikhail/prj/bird_clef_25/embeddings",
+                          voice_data_path="/home/mikhail/prj/bird_clef_25/data/train_voice_data.pkl",
+                          skip_existing=True):
+    """
+    Process audio files for all species in the list:
+    1. Load voice data
+    2. For each species, iterate over audio files
+    3. Remove human voice segments
+    4. Split into overlapping chunks
+    5. Extract embeddings from each chunk
+    6. Save embeddings
 
-    # Skip if not a directory
-    if not os.path.isdir(species_dir):
-        return
+    Args:
+        species_list: List of species IDs to process
+        train_dir: Directory containing audio files organized by species
+        output_dir: Directory to save embeddings
+        voice_data_path: Path to pickle file with voice segments
+        skip_existing: If True, skip files that already have embeddings saved
+    """
+    # Load voice data
+    voice_data = load_voice_data(voice_data_path)
 
-    # Create output directory for this species
-    os.makedirs(output_species_dir, exist_ok=True)
+    # Initialize BirdNET analyzer
+    get_analyzer()
 
-    # Get all OGG files for this species
-    audio_files = glob.glob(os.path.join(species_dir, "*.ogg"))
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
 
-    if not audio_files:
-        print(f"No audio files found for species {species_id}")
-        return
+    # Process each species
+    for species_id in tqdm(species_list, desc="Processing species"):
+        species_dir = os.path.join(train_dir, species_id)
 
-    print(f"Processing {len(audio_files)} files for species {species_id}")
-
-    # Process each audio file
-    for audio_file in tqdm(audio_files, desc=f"Species {species_id}"):
-        # Generate output filename based on the audio filename
-        base_name = os.path.basename(audio_file).replace('.ogg', '')
-        output_file = os.path.join(output_species_dir, f"{base_name}_embeddings.pkl")
-
-        # Skip if already processed
-        if os.path.exists(output_file):
+        # Skip if species directory doesn't exist
+        if not os.path.isdir(species_dir):
+            print(f"Warning: Directory for species {species_id} not found at {species_dir}")
             continue
 
-        # Extract embeddings
-        embeddings = extract_embeddings(audio_file)
+        # Create output directory for this species
+        species_output_dir = os.path.join(output_dir, species_id)
+        os.makedirs(species_output_dir, exist_ok=True)
 
-        # Save embeddings if successful
-        if embeddings is not None and len(embeddings) > 0:
-            with open(output_file, 'wb') as f:
-                pickle.dump(embeddings, f)
+        # Get all audio files for this species
+        audio_files = [f for f in os.listdir(species_dir) if f.endswith('.ogg')]
 
+        if not audio_files:
+            print(f"Warning: No audio files found for species {species_id}")
+            continue
 
-def main():
-    # Get list of all species directories
-    species_dirs = [d for d in os.listdir(AUDIO_DIR) if os.path.isdir(os.path.join(AUDIO_DIR, d))]
+        # Process each audio file
+        for file_name in tqdm(audio_files, desc=f"Processing files for {species_id}"):
+            file_path = os.path.join(species_dir, file_name)
 
-    print(f"Found {len(species_dirs)} species directories")
+            # Check if embeddings already exist for this file
+            output_file = os.path.join(species_output_dir, f"{os.path.splitext(file_name)[0]}_embeddings.pkl")
+            if skip_existing and os.path.exists(output_file):
+                print(f"Skipping {file_name} - embeddings already exist")
+                continue
 
-    # Process each species directory
-    for species_id in species_dirs:
-        process_species_directory(species_id)
+            try:
+                # Parse audio file
+                sr, audio = parse_file(file_path)
 
-    print("Embedding extraction complete!")
+                # Check if this file has voice segments
+                full_path = os.path.join(species_id, file_name)
+
+                voice_segments = []
+                # Check different possible keys for the voice data
+                key_format = f'/kaggle/input/birdclef-2025/train_audio/{full_path}'
+                if key_format in voice_data:
+                    voice_segments = voice_data[key_format]
+
+                # Remove voice segments if present
+                if voice_segments:
+                    print(f"Removing {len(voice_segments)} voice segments from {file_name}")
+                    audio = remove_voice_segments(audio, sr, voice_segments)
+
+                # Split into overlapping chunks
+                chunks = split_into_chunks(audio, sr)
+
+                # Get embeddings for each chunk
+                embeddings = []
+                for i, chunk in enumerate(chunks):
+                    embedding = get_embedding(chunk, sr)
+                    if embedding is not None and len(embedding) > 0:
+                        embeddings.append({
+                            'chunk_id': i,
+                            'file_name': file_name,
+                            'embedding': embedding
+                        })
+
+                # Save embeddings for this file
+                if embeddings:
+                    with open(output_file, 'wb') as f:
+                        pickle.dump(embeddings, f)
+                    print(f"Saved {len(embeddings)} embeddings for {file_name}")
+                else:
+                    print(f"Warning: No valid embeddings generated for {file_name}")
+
+            except Exception as e:
+                print(f"Error processing {file_path}: {e}")
+                continue
 
 
 if __name__ == "__main__":
-    main()
+    # Set paths
+    TRAIN_DIR = "/home/mikhail/prj/bc_25_data/train_audio"
+    OUTPUT_DIR = "/home/mikhail/prj/bird_clef_25/embeddings"
+    VOICE_DATA_PATH = "/home/mikhail/prj/bird_clef_25/data/train_voice_data.pkl"
+
+    # Process all species in the SPECIES list
+    process_species_audio(
+        species_list=SPECIES,
+        train_dir=TRAIN_DIR,
+        output_dir=OUTPUT_DIR,
+        voice_data_path=VOICE_DATA_PATH,
+        skip_existing=False
+    )

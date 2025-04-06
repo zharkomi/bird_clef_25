@@ -23,6 +23,7 @@ N_SPLITS = 5
 BATCH_SIZE = 32
 EPOCHS = 30
 RANDOM_STATE = 42
+USE_ENSEMBLE = True  # Enable/disable ensemble model creation
 
 # Create timestamped directory for outputs
 OUTPUT_DIR = os.path.join('train_' + datetime.now().strftime('%Y%m%d_%H%M%S'))
@@ -219,13 +220,15 @@ def create_tf_dataset(embeddings, labels, batch_size=32, is_training=False):
 
 # Function to create TensorFlow model
 def create_model(input_dim, num_classes):
+    """Create a classification model with proper input signatures for deployment"""
+    # Define the model architecture
     model = models.Sequential([
-        layers.Input(shape=(input_dim,)),
+        layers.Input(shape=(input_dim,), name='input_embeddings'),
         layers.Dense(256, activation='relu'),
         layers.Dropout(0.3),
         layers.Dense(128, activation='relu'),
         layers.Dropout(0.3),
-        layers.Dense(num_classes, activation='softmax')
+        layers.Dense(num_classes, activation='softmax', name='species_predictions')
     ])
 
     # Compile model
@@ -234,6 +237,11 @@ def create_model(input_dim, num_classes):
         loss='sparse_categorical_crossentropy',
         metrics=['accuracy']
     )
+
+    # Build the model with sample data to ensure it's fully constructed
+    # This helps with proper SavedModel export later
+    dummy_input = tf.random.normal((1, input_dim))
+    _ = model(dummy_input)
 
     return model
 
@@ -319,9 +327,153 @@ def plot_history(history, fold_num):
     plt.close()
 
 
+# Function to create an ensemble model from all fold models
+def create_ensemble_model(fold_models, input_shape, output_dir):
+    """
+    Create an ensemble model by averaging predictions from multiple fold models.
+    Saves the model in a deployment-friendly format.
+    """
+
+    # Create a custom ensemble model class
+    class EnsembleModel(tf.keras.Model):
+        def __init__(self, models):
+            super(EnsembleModel, self).__init__()
+            self.models = models
+
+        def call(self, inputs):
+            # Get predictions from each model
+            predictions = [model(inputs) for model in self.models]
+            # Stack and average predictions
+            stacked = tf.stack(predictions, axis=0)
+            return tf.reduce_mean(stacked, axis=0)
+
+    # Create ensemble model
+    ensemble_model = EnsembleModel(fold_models)
+
+    # Compile the model to ensure it has optimizer, loss, and metrics
+    ensemble_model.compile(
+        optimizer=tf.keras.optimizers.Adam(0.001),
+        loss='sparse_categorical_crossentropy',
+        metrics=['accuracy']
+    )
+
+    # Build the model with the correct input shape
+    dummy_input = tf.random.normal((1, input_shape))
+    _ = ensemble_model(dummy_input)  # Force build
+
+    # Create a concrete function with the correct input signature for saving
+    @tf.function(input_signature=[tf.TensorSpec(shape=[None, input_shape], dtype=tf.float32)])
+    def ensemble_predict(inputs):
+        return ensemble_model(inputs)
+
+    # Export as a SavedModel (standard deployment format)
+    tf.saved_model.save(
+        ensemble_model,
+        f'{output_dir}/species_classifier_ensemble',
+        signatures={'serving_default': ensemble_predict}
+    )
+
+    # Create TFLite version (for mobile/edge deployment)
+    converter = tf.lite.TFLiteConverter.from_concrete_functions(
+        [ensemble_predict.get_concrete_function()], ensemble_model
+    )
+    tflite_model = converter.convert()
+
+    # Save TFLite model
+    with open(f'{output_dir}/species_classifier_ensemble.tflite', 'wb') as f:
+        f.write(tflite_model)
+
+    print(f"Ensemble model saved to {output_dir}/species_classifier_ensemble")
+    print(f"TFLite version saved to {output_dir}/species_classifier_ensemble.tflite")
+
+    return ensemble_model
+
+
+# NEW: Function to evaluate the ensemble model
+def evaluate_ensemble_model(ensemble_model, val_datasets, label_encoders, output_dir):
+    """
+    Evaluate the ensemble model on combined validation data from all folds.
+    """
+    print("\n===== Evaluating Ensemble Model =====")
+
+    # First, we need to handle potential differences in label encoders across folds
+    # We'll use the label encoder from the last fold as our reference
+    reference_label_encoder = label_encoders[-1]
+
+    # Create a mapping between different fold label indices if needed
+    mappings = []
+    for le in label_encoders:
+        if set(le.classes_) != set(reference_label_encoder.classes_):
+            print("WARNING: Label encoders differ between folds. Using mapping.")
+            mapping = {}
+            for i, cls in enumerate(le.classes_):
+                mapping[i] = reference_label_encoder.transform([cls])[0]
+            mappings.append(mapping)
+        else:
+            mappings.append(None)
+
+    # Save the reference label encoder for the ensemble
+    with open(f'{output_dir}/species_label_encoder_ensemble.pkl', 'wb') as f:
+        pickle.dump(reference_label_encoder, f)
+
+    # Collect all validation predictions and true labels
+    all_predictions = []
+    all_true_labels = []
+
+    # Process each fold's validation data
+    for fold_idx, (val_dataset, label_encoder, mapping) in enumerate(zip(val_datasets, label_encoders, mappings)):
+        fold_predictions = []
+        fold_true_labels = []
+
+        # Make predictions on this fold's validation data
+        for embeddings, labels in val_dataset:
+            # Get ensemble predictions
+            batch_predictions = ensemble_model(embeddings)
+            predicted_indices = np.argmax(batch_predictions, axis=1)
+
+            # Map indices if needed
+            if mapping:
+                predicted_indices = np.array([mapping.get(idx, idx) for idx in predicted_indices])
+                fold_true_mapped = np.array([mapping.get(idx, idx) for idx in labels.numpy()])
+                fold_true_labels.extend(fold_true_mapped)
+            else:
+                fold_true_labels.extend(labels.numpy())
+
+            fold_predictions.extend(predicted_indices)
+
+        # Add this fold's results to the overall results
+        all_predictions.extend(fold_predictions)
+        all_true_labels.extend(fold_true_labels)
+
+    # Convert numeric predictions to species names
+    pred_species = reference_label_encoder.inverse_transform(all_predictions)
+    true_species = reference_label_encoder.inverse_transform(all_true_labels)
+
+    # Calculate accuracy and generate report
+    accuracy = accuracy_score(true_species, pred_species)
+    report = classification_report(true_species, pred_species, output_dict=True, zero_division=0)
+
+    print(f"Ensemble Model Validation Accuracy: {accuracy:.4f}")
+
+    # Print top 5 misclassified species
+    misclassified = pd.DataFrame({
+        'true': true_species,
+        'predicted': pred_species
+    })
+    misclassified = misclassified[misclassified['true'] != misclassified['predicted']]
+    if len(misclassified) > 0:
+        print("\nTop misclassified species (Ensemble Model):")
+        top_errors = misclassified.groupby(['true', 'predicted']).size().reset_index(name='count')
+        top_errors = top_errors.sort_values('count', ascending=False).head(5)
+        print(top_errors)
+
+    return accuracy, report
+
+
 def main():
     print("Starting bird species classification training with stratified k-fold cross-validation")
     print(f"Configuration: {N_SPLITS} folds, {BATCH_SIZE} batch size, {EPOCHS} max epochs")
+    print(f"Using ensemble model: {USE_ENSEMBLE}")
 
     # Step 1: Collect embedding files for each species
     print("Collecting embedding files...")
@@ -342,6 +494,11 @@ def main():
     fold_accuracies = []
     fold_histories = []
     all_reports = []
+
+    # Store models and data for ensemble
+    fold_models = []
+    val_datasets = []
+    label_encoders = []
 
     # Step 3: Perform stratified k-fold cross-validation
     for fold, (train_idx, val_idx) in enumerate(kfold.split(all_embeddings, stratify_labels)):
@@ -401,17 +558,28 @@ def main():
         fold_histories.append(history)
         all_reports.append(report)
 
+        # Store model and data for ensemble
+        fold_models.append(model)
+        val_datasets.append(val_dataset)
+        label_encoders.append(label_encoder)
+
         # Plot training history
         plot_history(history, fold + 1)
 
-        # Save model and label encoder for this fold
-        model.save(f'{OUTPUT_DIR}/species_classifier_fold{fold + 1}.keras')
+        # Save model and label encoder for this fold in deployment-friendly format
+        # Save using the model.save method to include Keras metadata
+        model.save(f'{OUTPUT_DIR}/species_classifier_fold{fold + 1}_keras')
+
+        # Also save in SavedModel format if needed for other purposes
+        tf.saved_model.save(model, f'{OUTPUT_DIR}/species_classifier_fold{fold + 1}')
+
+        # Save label encoder
         with open(f'{OUTPUT_DIR}/species_label_encoder_fold{fold + 1}.pkl', 'wb') as f:
             pickle.dump(label_encoder, f)
 
     # Step 4: Summarize results across all folds
     print("\n===== Stratified K-Fold Cross-Validation Summary =====")
-    print(f"Number of folds: {N_SPLITS}")
+    print(f"Number of folds: {len(fold_accuracies)}")
     print(f"Average Validation Accuracy: {np.mean(fold_accuracies):.4f} ± {np.std(fold_accuracies):.4f}")
     print(f"Individual Fold Accuracies: {[f'{acc:.4f}' for acc in fold_accuracies]}")
 
@@ -440,13 +608,71 @@ def main():
             print(f"  Weighted {metric}: {np.mean(values):.4f} ± {np.std(values):.4f}")
 
     # Save best model based on validation accuracy
-    best_fold = np.argmax(fold_accuracies) + 1
-    print(f"\nBest performing model was from fold {best_fold} with accuracy {fold_accuracies[best_fold - 1]:.4f}")
+    if fold_accuracies:
+        import shutil
+        best_fold = np.argmax(fold_accuracies) + 1
+        print(f"\nBest performing model was from fold {best_fold} with accuracy {fold_accuracies[best_fold - 1]:.4f}")
 
-    # Copy best model to final model file
-    import shutil
-    shutil.copy(f'{OUTPUT_DIR}/species_classifier_fold{best_fold}.keras', f'{OUTPUT_DIR}/species_classifier_final.keras')
-    shutil.copy(f'{OUTPUT_DIR}/species_label_encoder_fold{best_fold}.pkl', f'{OUTPUT_DIR}/species_label_encoder_final.pkl')
+        # Copy the best Keras model file
+        if os.path.exists(f'{OUTPUT_DIR}/species_classifier_fold{best_fold}_keras'):
+            # Copy the Keras model directory
+            if os.path.exists(f'{OUTPUT_DIR}/species_classifier_final'):
+                shutil.rmtree(f'{OUTPUT_DIR}/species_classifier_final')
+            shutil.copytree(f'{OUTPUT_DIR}/species_classifier_fold{best_fold}_keras',
+                            f'{OUTPUT_DIR}/species_classifier_final')
+            print(f"Copied Keras model from fold {best_fold} to final")
+
+        # Copy label encoder
+        shutil.copy(f'{OUTPUT_DIR}/species_label_encoder_fold{best_fold}.pkl',
+                    f'{OUTPUT_DIR}/species_label_encoder_final.pkl')
+        print(f"Copied label encoder from fold {best_fold} to final")
+    else:
+        print("No valid fold models were trained.")
+
+    # Create and evaluate ensemble model if enabled
+    if USE_ENSEMBLE and len(fold_models) > 1:
+        print("\n===== Creating and Evaluating Ensemble Model =====")
+
+        # Create ensemble model
+        ensemble_model = create_ensemble_model(fold_models, input_dim, OUTPUT_DIR)
+
+        # Evaluate ensemble model
+        ensemble_acc, ensemble_report = evaluate_ensemble_model(
+            ensemble_model,
+            val_datasets,
+            label_encoders,
+            OUTPUT_DIR
+        )
+
+        # Compare with best single model
+        best_fold_acc = max(fold_accuracies)
+        print(f"\nModel Comparison:")
+        print(f"  Best Single Model Accuracy: {best_fold_acc:.4f}")
+        print(f"  Ensemble Model Accuracy: {ensemble_acc:.4f}")
+
+        # Report improvement or decline
+        diff = ensemble_acc - best_fold_acc
+        if diff > 0:
+            print(f"  Ensemble improves accuracy by {diff:.4f} ({diff * 100:.2f}%)")
+        else:
+            print(f"  Ensemble reduces accuracy by {abs(diff):.4f} ({abs(diff) * 100:.2f}%)")
+
+        # Create TFLite version of best individual model
+        print("\nCreating TFLite version of the best individual model...")
+
+        # Use tf.keras.models.load_model instead of tf.saved_model.load
+        best_model = tf.keras.models.load_model(f'{OUTPUT_DIR}/species_classifier_final')
+
+        # Convert to TFLite (with optimization for size and latency)
+        converter = tf.lite.TFLiteConverter.from_keras_model(best_model)
+        converter.optimizations = [tf.lite.Optimize.DEFAULT]
+        tflite_model = converter.convert()
+
+        # Save TFLite model
+        with open(f'{OUTPUT_DIR}/species_classifier_final.tflite', 'wb') as f:
+            f.write(tflite_model)
+
+        print(f"TFLite version of best model saved to {OUTPUT_DIR}/species_classifier_final.tflite")
 
     print("\nTraining and evaluation complete!")
 
