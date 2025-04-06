@@ -5,8 +5,8 @@ import numpy as np
 import tensorflow as tf
 
 # Global configuration variables
-MODEL_PATH = None
-LABEL_ENCODER_PATH = None
+EMB_MODEL_PATH = None
+EMB_LABEL_ENCODER_PATH = None
 
 # Global cache for model interpreters and label encoders
 _MODEL_CACHE = {}
@@ -17,9 +17,9 @@ def _load_tflite_interpreter(model_path=None):
     """Load and cache TFLite interpreter"""
     # Use global path if none provided
     if model_path is None:
-        if MODEL_PATH is None:
+        if EMB_MODEL_PATH is None:
             raise ValueError("No model path specified. Call set_model_paths() first or provide path explicitly.")
-        model_path = MODEL_PATH
+        model_path = EMB_MODEL_PATH
 
     if model_path not in _MODEL_CACHE:
         if not os.path.exists(model_path):
@@ -42,10 +42,10 @@ def _load_label_encoder(label_encoder_path=None):
     """Load and cache label encoder"""
     # Use global path if none provided
     if label_encoder_path is None:
-        if LABEL_ENCODER_PATH is None:
+        if EMB_LABEL_ENCODER_PATH is None:
             raise ValueError(
                 "No label encoder path specified. Call set_model_paths() first or provide path explicitly.")
-        label_encoder_path = LABEL_ENCODER_PATH
+        label_encoder_path = EMB_LABEL_ENCODER_PATH
 
     if label_encoder_path not in _LABEL_ENCODER_CACHE:
         if not os.path.exists(label_encoder_path):
@@ -110,7 +110,7 @@ def predict_species_probabilities(embedding, min_confidence=0.0, max_results=Non
         raise ValueError(f"Embedding must have shape (1024,), got {embedding.shape}")
 
     # Get cached interpreter and details
-    model_data = _load_tflite_interpreter(MODEL_PATH)
+    model_data = _load_tflite_interpreter(EMB_MODEL_PATH)
     interpreter = model_data['interpreter']
     input_details = model_data['input_details']
     output_details = model_data['output_details']
@@ -143,7 +143,7 @@ def predict_species_probabilities(embedding, min_confidence=0.0, max_results=Non
     confidence_dict = calculate_birdnet_confidence(probabilities)
 
     # Get cached label encoder
-    label_encoder = _load_label_encoder(LABEL_ENCODER_PATH)
+    label_encoder = _load_label_encoder(EMB_LABEL_ENCODER_PATH)
 
     # Create a dictionary mapping species names to confidence scores
     species_confidence = {}

@@ -104,8 +104,8 @@ def process_audio_file(file_path):
             sr, y = parse_file(file_path)
 
             # Get predictions using the fixed-chunk method
-            chunk_predictions, _ = predict_denoised(sr, y)
-            # chunk_predictions, _ = predict_audio(sr, y)
+            # chunk_predictions, _ = predict_denoised(sr, y)
+            chunk_predictions, _ = predict_audio(sr, y)
 
             # Create a deep copy of the results to avoid TensorFlow references
             file_results = []

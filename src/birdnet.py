@@ -6,6 +6,11 @@ from birdnetlib.analyzer import Analyzer
 from scipy.interpolate import CubicSpline
 from scipy.special import softmax
 
+try:
+    import tflite_runtime.interpreter as tflite
+except:
+    from tensorflow import lite as tflite
+
 from src.embeddings import predict_species_probabilities
 from src.utils import load_clef_labels
 
@@ -16,8 +21,8 @@ _species_df = None
 _scientific_to_id = {}
 _common_to_id = {}
 
-MODEL_PATH = "bn/BirdNET_GLOBAL_6K_V2.4_Model_FP32.tflite"
-LABELS_FILE = "bn/BirdNET_GLOBAL_6K_V2.4_Labels.txt"
+BN_MODEL_FILE = "bn/BirdNET_GLOBAL_6K_V2.4_Model_FP32.tflite"
+BN_LABELS_FILE = "bn/BirdNET_GLOBAL_6K_V2.4_Labels.txt"
 CSV_PATH = "--path-to-your-csv--"
 
 
@@ -26,6 +31,16 @@ def get_analyzer():
     global _analyzer
     if _analyzer is None:
         _analyzer = Analyzer()
+        _analyzer.model_path = BN_MODEL_FILE
+        _analyzer.label_path = BN_LABELS_FILE
+        _analyzer.interpreter = tflite.Interpreter(
+            model_path=BN_MODEL_FILE,
+            num_threads=1,
+            experimental_preserve_all_tensors=True  # otherwise fails to extract embeddings in environment without GPU
+        )
+        _analyzer.interpreter.allocate_tensors()
+        _analyzer.input_details = _analyzer.interpreter.get_input_details()
+        _analyzer.output_details = _analyzer.interpreter.get_output_details()
     return _analyzer
 
 
@@ -33,7 +48,7 @@ def load_birdnet_labels():
     """Load species labels from file."""
     global _labels
     if _labels is None:
-        with open(LABELS_FILE, 'r', encoding='utf-8') as f:
+        with open(BN_LABELS_FILE, 'r', encoding='utf-8') as f:
             _labels = [line.strip() for line in f]
     return _labels
 
