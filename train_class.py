@@ -5,6 +5,8 @@ import numpy as np
 import pandas as pd
 import glob
 import pickle
+
+from keras.src import regularizers
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import classification_report, accuracy_score
@@ -14,6 +16,7 @@ from collections import defaultdict
 import matplotlib.pyplot as plt
 
 from cuda import setup_cuda
+from src.utils import custom_loss
 
 setup_cuda()
 
@@ -218,30 +221,41 @@ def create_tf_dataset(embeddings, labels, batch_size=32, is_training=False):
     return dataset
 
 
-# Function to create TensorFlow model
-def create_model(input_dim, num_classes):
-    """Create a classification model with proper input signatures for deployment"""
-    # Define the model architecture
+def create_model(input_dim=1024, num_classes=61, dropout_rate=0.3):
+    """Create a classification model for transfer learning from embeddings"""
     model = models.Sequential([
         layers.Input(shape=(input_dim,), name='input_embeddings'),
-        layers.Dense(256, activation='relu'),
-        layers.Dropout(0.3),
-        layers.Dense(128, activation='relu'),
-        layers.Dropout(0.3),
-        layers.Dense(num_classes, activation='softmax', name='species_predictions')
+
+        # First hidden layer with BatchNorm and regularization
+        layers.Dense(128, kernel_regularizer=regularizers.l2(0.001)),
+        layers.BatchNormalization(),
+        layers.Activation('relu'),
+        layers.Dropout(dropout_rate),
+
+        # Second hidden layer
+        layers.Dense(64, kernel_regularizer=regularizers.l2(0.001)),
+        layers.BatchNormalization(),
+        layers.Activation('relu'),
+        layers.Dropout(dropout_rate),
+
+        # Output layer - NO activation here to match BirdNET's approach
+        layers.Dense(num_classes, name='species_logits')
     ])
+
+    # Learning rate schedule
+    lr_schedule = optimizers.schedules.ExponentialDecay(
+        initial_learning_rate=0.001,
+        decay_steps=1000,
+        decay_rate=0.9,
+        staircase=True
+    )
 
     # Compile model
     model.compile(
-        optimizer=optimizers.Adam(learning_rate=0.001),
-        loss='sparse_categorical_crossentropy',
+        optimizer=optimizers.Adam(learning_rate=lr_schedule),
+        loss=custom_loss,
         metrics=['accuracy']
     )
-
-    # Build the model with sample data to ensure it's fully constructed
-    # This helps with proper SavedModel export later
-    dummy_input = tf.random.normal((1, input_dim))
-    _ = model(dummy_input)
 
     return model
 
@@ -282,8 +296,14 @@ def evaluate_model(model, val_dataset, label_encoder):
     true_labels = []
 
     for embeddings, labels in val_dataset:
-        batch_predictions = model.predict(embeddings)
-        predictions.extend(np.argmax(batch_predictions, axis=1))
+        # Get raw logits from the model
+        batch_logits = model.predict(embeddings)
+        # Apply sigmoid transformation similar to BirdNET
+        batch_confidences = flat_sigmoid(batch_logits, sensitivity=-1.0)
+        # Get predicted class indices from the confidences
+        batch_predictions = np.argmax(batch_confidences, axis=1)
+
+        predictions.extend(batch_predictions)
         true_labels.extend(labels.numpy())
 
     # Convert numeric labels back to original species names
@@ -297,6 +317,12 @@ def evaluate_model(model, val_dataset, label_encoder):
     report = classification_report(true_species, pred_species, output_dict=True, zero_division=0)
 
     return accuracy, report, pred_species, true_species
+
+
+# BirdNET-style sigmoid function
+def flat_sigmoid(x, sensitivity=-1.0):
+    """Apply the same custom sigmoid function used by BirdNET"""
+    return 1.0 / (1.0 + np.exp(sensitivity * np.clip(x, -15, 15)))
 
 
 # Function to plot training history
@@ -427,9 +453,12 @@ def evaluate_ensemble_model(ensemble_model, val_datasets, label_encoders, output
 
         # Make predictions on this fold's validation data
         for embeddings, labels in val_dataset:
-            # Get ensemble predictions
-            batch_predictions = ensemble_model(embeddings)
-            predicted_indices = np.argmax(batch_predictions, axis=1)
+            # Get ensemble predictions (raw logits)
+            batch_logits = ensemble_model(embeddings)
+            # Apply sigmoid transformation similar to BirdNET
+            batch_confidences = flat_sigmoid(batch_logits, sensitivity=-1.0)
+            # Get predicted class indices
+            predicted_indices = np.argmax(batch_confidences, axis=1)
 
             # Map indices if needed
             if mapping:
@@ -661,7 +690,11 @@ def main():
         print("\nCreating TFLite version of the best individual model...")
 
         # Use tf.keras.models.load_model instead of tf.saved_model.load
-        best_model = tf.keras.models.load_model(f'{OUTPUT_DIR}/species_classifier_final')
+        custom_objects = {'custom_loss': custom_loss}
+        best_model = tf.keras.models.load_model(
+            f'{OUTPUT_DIR}/species_classifier_final',
+            custom_objects=custom_objects
+        )
 
         # Convert to TFLite (with optimization for size and latency)
         converter = tf.lite.TFLiteConverter.from_keras_model(best_model)

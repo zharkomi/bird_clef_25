@@ -24,6 +24,7 @@ _common_to_id = {}
 BN_MODEL_FILE = "bn/BirdNET_GLOBAL_6K_V2.4_Model_FP32.tflite"
 BN_LABELS_FILE = "bn/BirdNET_GLOBAL_6K_V2.4_Labels.txt"
 CSV_PATH = "--path-to-your-csv--"
+CALC_EMBEDDINGS = True
 
 
 def get_analyzer():
@@ -114,88 +115,6 @@ def split_species_safely(species_full):
     return scientific_name.lower(), common_name.lower()
 
 
-def analyze_audio_fixed_chunks(audio,
-                               chunk_duration=5,
-                               sample_rate=32000):
-    """
-    Analyze bird sounds in fixed, non-overlapping chunks and map to required class labels.
-    Uses birdnetlib for all processing.
-
-    Parameters:
-    - audio: Audio signal as numpy array
-    - chunk_duration: Duration of each chunk in seconds (default: 5)
-    - sample_rate: Sample rate of the audio
-
-    Returns:
-    - List of dictionaries, one for each chunk. Each dictionary contains:
-      - 'row_id': The end time of the chunk in seconds
-      - And one key for each species_id with its confidence score
-    """
-    class_labels = load_clef_labels()
-
-    # Load species data if not already loaded
-    load_species_data()
-
-    # Ensure correct sample rate for BirdNET
-    birdnet_sr = 48000
-    if sample_rate != birdnet_sr:
-        audio = librosa.resample(audio, orig_sr=sample_rate, target_sr=birdnet_sr)
-        sample_rate = birdnet_sr
-
-    # Calculate chunk size in samples
-    chunk_size = int(chunk_duration * sample_rate)
-
-    # Prepare results list
-    results = []
-
-    # Process audio in non-overlapping chunks
-    for chunk_idx, chunk_start in enumerate(range(0, len(audio), chunk_size)):
-        # Extract chunk
-        chunk_end = min(chunk_start + chunk_size, len(audio))
-        chunk = audio[chunk_start:chunk_end]
-
-        # Initialize probabilities for all class_labels (set to 0 initially)
-        chunk_result = {species_id: 0.0 for species_id in class_labels}
-
-        # Skip prediction if chunk is too short
-        if len(chunk) < sample_rate:
-            chunk_result['row_id'] = chunk_end // sample_rate
-            results.append(chunk_result)
-            continue
-
-        # Normalize chunk (with safety check for silent segments)
-        max_abs_val = np.max(np.abs(chunk))
-        if max_abs_val > 0:
-            chunk = chunk / max_abs_val
-
-        # Get predictions
-        predictions = analyze_chunk(chunk, sample_rate).detections
-
-        # Map birdnetlib predictions to our class labels
-        # analyze() returns a list of dictionaries with detection details
-        for detection in predictions:
-
-            # Get both scientific and common names from detection
-            scientific_name = detection['scientific_name'].lower() if 'scientific_name' in detection else ""
-            common_name = detection['common_name'].lower() if 'common_name' in detection else ""
-            confidence = detection['confidence']
-
-            # Find matching species ID
-            species_id = get_species_id(common_name, scientific_name)
-
-            # Update probability if species is in our class_labels
-            if species_id is not None and species_id in class_labels:
-                chunk_result[species_id] = confidence
-
-        # Add row_id to the chunk result
-        chunk_result['row_id'] = chunk_end // sample_rate
-
-        # Add result for this chunk
-        results.append(chunk_result)
-
-    return results
-
-
 def get_species_id(common_name, scientific_name):
     load_species_data()
     species_id = None
@@ -241,7 +160,7 @@ def analyze_audio(audio, sample_rate):
     #     sample_rate = birdnet_sr
 
     # Define minimum confidence threshold - use the same as in RecordingBuffer
-    min_conf = 1e-10
+    min_conf = 0.01
 
     analyzer = get_analyzer()
     recording = RecordingBuffer(
@@ -304,25 +223,26 @@ def analyze_audio(audio, sample_rate):
             bn_result[time_idx, species_idx] = rec['confidence']
 
     # Process embeddings and integrate their predictions into bn_result
-    for emb in recording.embeddings:
-        # Get time index for this embedding
-        time_idx = int(emb['start_time'] // 3)
+    if CALC_EMBEDDINGS:
+        for emb in recording.embeddings:
+            # Get time index for this embedding
+            time_idx = int(emb['start_time'] // 3)
 
-        # Skip if time_idx is out of bounds
-        if time_idx >= required_3sec_chunks:
-            continue
-
-        # Get predictions from embeddings with the same min_conf threshold
-        species_predictions = predict_species_probabilities(emb['embeddings'])
-
-        # Map species predictions to bn_result
-        for species_name, prob in species_predictions.items():
-            # Skip very low probability predictions based on min_conf
-            if prob < min_conf:
+            # Skip if time_idx is out of bounds
+            if time_idx >= required_3sec_chunks:
                 continue
-            species_idx = species_id_to_index[species_name]
-            # Update bn_result with the maximum confidence between existing and new prediction
-            bn_result[time_idx, species_idx] = max(bn_result[time_idx, species_idx], prob)
+
+            # Get predictions from embeddings with the same min_conf threshold
+            species_predictions = predict_species_probabilities(emb['embeddings'], min_conf)
+
+            # Map species predictions to bn_result
+            for species_name, prob in species_predictions.items():
+                # Skip very low probability predictions based on min_conf
+                if prob < min_conf:
+                    continue
+                species_idx = species_id_to_index[species_name]
+                # Update bn_result with the maximum confidence between existing and new prediction
+                bn_result[time_idx, species_idx] = max(bn_result[time_idx, species_idx], prob)
 
     # Convert raw confidence scores to probabilities using softmax for each time step
     # for i in range(bn_result.shape[0]):

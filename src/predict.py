@@ -9,7 +9,7 @@ import pandas as pd
 import tensorflow as tf
 
 from src.audio import parse_file
-from src.birdnet import analyze_audio_fixed_chunks, analyze_audio
+from src.birdnet import analyze_audio
 from src.birdnet import load_species_data
 from src.utils import load_clef_labels
 from src.wavelet import wavelet_denoise

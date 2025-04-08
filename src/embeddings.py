@@ -57,35 +57,35 @@ def _load_label_encoder(label_encoder_path=None):
     return _LABEL_ENCODER_CACHE[label_encoder_path]
 
 
-def calculate_birdnet_confidence(probabilities):
+def flat_sigmoid(x, sensitivity=-1.0):
     """
-    Calculate confidence scores similar to BirdNET.
+    Apply the same custom sigmoid function used by BirdNET.
 
     Args:
-        probabilities: Model softmax probability outputs as numpy array
+        x: Input array or value
+        sensitivity: Sigmoid sensitivity parameter, default -1.0
 
     Returns:
-        Dictionary mapping species to confidence scores
+        Transformed values after applying custom sigmoid
     """
-    # Apply sigmoid-like scaling to emphasize high confidence predictions
-    # and de-emphasize low confidence predictions
-    max_prob = np.max(probabilities)
-
-    # Scale confidence values - using power transform
-    confidence_values = {}
-    for i, prob in enumerate(probabilities):
-        # Skip zero or very low probabilities
-        if prob < 0.01:
-            continue
-
-        # BirdNET-style scaling: power transform and percentage
-        confidence = np.power(prob, 1.5) * 100
-        confidence_values[i] = confidence
-
-    return confidence_values
+    return 1.0 / (1.0 + np.exp(sensitivity * np.clip(x, -15, 15)))
 
 
-def predict_species_probabilities(embedding, min_confidence=0.0, max_results=None):
+def calculate_birdnet_confidence(logits):
+    """
+    Calculate confidence scores exactly like BirdNET does.
+
+    Args:
+        logits: Raw model output logits as numpy array
+
+    Returns:
+        Confidence scores after applying BirdNET's sigmoid transformation
+    """
+    # Apply BirdNET's custom sigmoid transformation
+    return flat_sigmoid(logits, sensitivity=-1.0)
+
+
+def predict_species_probabilities(embedding, min_confidence=0.1):
     """
     Predict species with BirdNET-like confidence scores from an audio embedding
     using the TFLite ensemble model.
@@ -93,8 +93,7 @@ def predict_species_probabilities(embedding, min_confidence=0.0, max_results=Non
 
     Args:
         embedding: A numpy array of shape (1024,) containing the audio embedding
-        min_confidence: Minimum confidence threshold (0-100) to include in results
-        max_results: Maximum number of results to return (None for all)
+        min_confidence: Minimum confidence threshold (0-1) to include in results
 
     Returns:
         A dictionary mapping species names to their confidence scores, sorted by confidence
@@ -130,35 +129,27 @@ def predict_species_probabilities(embedding, min_confidence=0.0, max_results=Non
     # Run inference
     interpreter.invoke()
 
-    # Get the output tensor
+    # Get the output tensor (these are logits, not probabilities)
     output_data = interpreter.get_tensor(output_details[0]['index'])
 
     # If output has batch dimension, remove it
     if len(output_data.shape) > 1 and output_data.shape[0] == 1:
-        probabilities = output_data[0]
+        logits = output_data[0]
     else:
-        probabilities = output_data
+        logits = output_data
 
-    # Calculate confidence scores from probabilities
-    confidence_dict = calculate_birdnet_confidence(probabilities)
+    # Calculate BirdNET confidence scores from logits
+    confidences = calculate_birdnet_confidence(logits)
 
     # Get cached label encoder
     label_encoder = _load_label_encoder(EMB_LABEL_ENCODER_PATH)
 
     # Create a dictionary mapping species names to confidence scores
     species_confidence = {}
-    for idx, confidence in confidence_dict.items():
+    for idx, confidence in enumerate(confidences):
         # Apply minimum confidence threshold
         if confidence >= min_confidence:
             species = label_encoder.classes_[idx]
             species_confidence[species] = float(confidence)
 
-    # Sort by confidence (descending)
-    sorted_results = dict(sorted(species_confidence.items(), key=lambda x: x[1], reverse=True))
-
-    # Limit results if requested
-    if max_results is not None and max_results > 0:
-        # Keep only the top max_results entries
-        sorted_results = dict(list(sorted_results.items())[:max_results])
-
-    return sorted_results
+    return species_confidence

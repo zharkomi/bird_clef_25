@@ -1,7 +1,7 @@
 import os
 
 import soundfile as sf
-
+import tensorflow as tf
 from src.audio import parse_file
 from src.wavelet import wavelet_denoise
 
@@ -77,3 +77,13 @@ def denoise_and_play(file_path):
     sf.write(denoised_file_path, y1, sr, format="wav")
 
     os.system(f"vlc {file_path} {denoised_file_path}")
+
+
+# At the top of your file, define the custom loss function outside of any other function
+def custom_loss(y_true, y_pred):
+    # Squeeze the labels to remove any extra dimensions
+    y_true_squeezed = tf.squeeze(y_true)
+    return tf.nn.sparse_softmax_cross_entropy_with_logits(
+        labels=tf.cast(y_true_squeezed, tf.int32),
+        logits=y_pred
+    )
