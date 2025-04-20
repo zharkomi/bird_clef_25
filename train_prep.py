@@ -230,6 +230,41 @@ def load_fold_from_disk(fold_idx, train_dir):
         return None
 
 
+def check_fold_status(output_dir, n_splits):
+    """
+    Check which folds are already trained and which need training.
+
+    Args:
+        n_splits: Total number of folds to check
+
+    Returns:
+        tuple: (already_trained, remaining_folds) lists of fold indices
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    already_trained = []
+    remaining_folds = []
+
+    for fold_idx in range(n_splits):
+        model_file = os.path.join(output_dir, f"best_species_classifier_fold{fold_idx + 1}.keras")
+        fold_file = os.path.join(output_dir, f"fold_{fold_idx + 1}.pkl")
+
+        if os.path.exists(model_file):
+            print(f"Fold {fold_idx + 1} already trained. Skipping.")
+            already_trained.append(fold_idx)
+        elif os.path.exists(fold_file):
+            print(f"Fold {fold_idx + 1} has prepared data but not trained yet.")
+            remaining_folds.append(fold_idx)
+        else:
+            print(f"Fold {fold_idx + 1} needs data preparation and training.")
+            remaining_folds.append(fold_idx)
+
+    print(f"Already trained folds: {already_trained}")
+    print(f"Remaining folds to train: {remaining_folds}")
+
+    return already_trained, remaining_folds
+
+
 # Modified prepare_data function
 def prepare_data(folds_to_train=None):
     """

@@ -14,7 +14,7 @@ from tensorflow.keras import layers, models, optimizers, callbacks
 from cuda import setup_cuda
 from src.utils import custom_loss
 from train_prep import collect_embedding_files, prepare_kfold_datasets, prepare_fold_data, create_tf_dataset, N_SPLITS, \
-    prepare_data
+    prepare_data, check_fold_status
 
 setup_cuda()
 
@@ -24,8 +24,7 @@ EPOCHS = 30
 USE_ENSEMBLE = True  # Enable/disable ensemble model creation
 
 # Create timestamped directory for outputs
-OUTPUT_DIR = os.path.join('train_' + datetime.now().strftime('%Y%m%d_%H%M%S'))
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+OUTPUT_DIR = "train"
 
 
 def create_model(input_dim=1024, num_classes=61, dropout_rate=0.3):
@@ -306,42 +305,6 @@ def evaluate_ensemble_model(ensemble_model, val_datasets, label_encoders, output
     return accuracy, report
 
 
-def check_fold_status(n_splits):
-    """
-    Check which folds are already trained and which need training.
-
-    Args:
-        n_splits: Total number of folds to check
-
-    Returns:
-        tuple: (already_trained, remaining_folds) lists of fold indices
-    """
-    train_dir = "train"
-    os.makedirs(train_dir, exist_ok=True)
-
-    already_trained = []
-    remaining_folds = []
-
-    for fold_idx in range(n_splits):
-        model_file = os.path.join(train_dir, f"species_classifier_fold{fold_idx + 1}.keras")
-        fold_file = os.path.join(train_dir, f"fold_{fold_idx + 1}.pkl")
-
-        if os.path.exists(model_file):
-            print(f"Fold {fold_idx + 1} already trained. Skipping.")
-            already_trained.append(fold_idx)
-        elif os.path.exists(fold_file):
-            print(f"Fold {fold_idx + 1} has prepared data but not trained yet.")
-            remaining_folds.append(fold_idx)
-        else:
-            print(f"Fold {fold_idx + 1} needs data preparation and training.")
-            remaining_folds.append(fold_idx)
-
-    print(f"Already trained folds: {already_trained}")
-    print(f"Remaining folds to train: {remaining_folds}")
-
-    return already_trained, remaining_folds
-
-
 def train_fold(fold_idx, fold_data, batch_size, epochs, output_dir):
     """
     Train a model for a specific fold.
@@ -603,7 +566,7 @@ def main():
     print(f"Using ensemble model: {USE_ENSEMBLE}")
 
     # Check which folds need training
-    already_trained, remaining_folds = check_fold_status(N_SPLITS)
+    already_trained, remaining_folds = check_fold_status(OUTPUT_DIR, N_SPLITS)
 
     # Get data only for remaining folds
     fold_generator = prepare_data(remaining_folds if len(remaining_folds) < N_SPLITS else None)
@@ -682,5 +645,6 @@ def main():
 
 
 if __name__ == "__main__":
-    OUTPUT_DIR = "train"
+    # OUTPUT_DIR = os.path.join('train_' + datetime.now().strftime('%Y%m%d_%H%M%S'))
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     main()
