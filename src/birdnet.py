@@ -24,7 +24,8 @@ _common_to_id = {}
 BN_MODEL_FILE = "bn/BirdNET_GLOBAL_6K_V2.4_Model_FP32.tflite"
 BN_LABELS_FILE = "bn/BirdNET_GLOBAL_6K_V2.4_Labels.txt"
 CSV_PATH = "--path-to-your-csv--"
-CALC_EMBEDDINGS = True
+USE_EMBEDDINGS = True
+USE_BN = True
 
 
 def get_analyzer():
@@ -212,18 +213,19 @@ def analyze_audio(audio, sample_rate):
     bn_result = np.zeros((required_3sec_chunks, len(class_labels)))
 
     # Fill the result with BirdNet prediction
-    for rec in recording.detections:
-        species_id = get_species_id(rec['common_name'], rec['scientific_name'])
-        if species_id is not None and species_id in species_id_to_index:
-            time_idx = int(rec['start_time'] // 3)
-            # Skip if time_idx is out of bounds
-            if time_idx >= required_3sec_chunks:
-                continue
-            species_idx = species_id_to_index[species_id]
-            bn_result[time_idx, species_idx] = rec['confidence']
+    if USE_BN:
+        for rec in recording.detections:
+            species_id = get_species_id(rec['common_name'], rec['scientific_name'])
+            if species_id is not None and species_id in species_id_to_index:
+                time_idx = int(rec['start_time'] // 3)
+                # Skip if time_idx is out of bounds
+                if time_idx >= required_3sec_chunks:
+                    continue
+                species_idx = species_id_to_index[species_id]
+                bn_result[time_idx, species_idx] = rec['confidence']
 
     # Process embeddings and integrate their predictions into bn_result
-    if CALC_EMBEDDINGS:
+    if USE_EMBEDDINGS:
         for emb in recording.embeddings:
             # Get time index for this embedding
             time_idx = int(emb['start_time'] // 3)

@@ -226,11 +226,12 @@ if __name__ == "__main__":
     OUTPUT_DIR = "/home/mikhail/prj/bird_clef_25/embeddings"
     VOICE_DATA_PATH = "/home/mikhail/prj/bird_clef_25/data/train_voice_data.pkl"
 
+    all_classes = os.listdir(TRAIN_DIR)
     # Process all species in the SPECIES list
     process_species_audio(
-        species_list=SPECIES,
+        species_list=all_classes,  # SPECIES,
         train_dir=TRAIN_DIR,
         output_dir=OUTPUT_DIR,
         voice_data_path=VOICE_DATA_PATH,
-        skip_existing=False
+        skip_existing=True
     )

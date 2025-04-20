@@ -1,224 +1,31 @@
 import os
+import pickle
+from collections import defaultdict
 from datetime import datetime
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import glob
-import pickle
-
-from keras.src import regularizers
-from sklearn.model_selection import StratifiedKFold
-from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import classification_report, accuracy_score
 import tensorflow as tf
+from keras.src import regularizers
+from sklearn.metrics import classification_report, accuracy_score
 from tensorflow.keras import layers, models, optimizers, callbacks
-from collections import defaultdict
-import matplotlib.pyplot as plt
 
 from cuda import setup_cuda
 from src.utils import custom_loss
+from train_prep import collect_embedding_files, prepare_kfold_datasets, prepare_fold_data, create_tf_dataset, N_SPLITS, \
+    prepare_data
 
 setup_cuda()
 
 # Configuration variables - edit these to match your environment
-EMBEDDINGS_DIR = '/home/mikhail/prj/bird_clef_25/embeddings'
-N_SPLITS = 5
 BATCH_SIZE = 32
 EPOCHS = 30
-RANDOM_STATE = 42
 USE_ENSEMBLE = True  # Enable/disable ensemble model creation
 
 # Create timestamped directory for outputs
 OUTPUT_DIR = os.path.join('train_' + datetime.now().strftime('%Y%m%d_%H%M%S'))
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-
-# Function to collect all embedding files by species
-def collect_embedding_files(base_dir):
-    """
-    Collect all embedding files from the specified directory structure.
-    """
-    species_files = {}
-
-    # Iterate through each species directory
-    for species_id in os.listdir(base_dir):
-        species_dir = os.path.join(base_dir, species_id)
-        if os.path.isdir(species_dir):
-            # Get all pickle files in this directory
-            embedding_files = glob.glob(os.path.join(species_dir, "*.pkl"))
-
-            if embedding_files:  # Only add species if it has embedding files
-                species_files[species_id] = embedding_files
-                print(f"Found {len(embedding_files)} embedding files for species: {species_id}")
-
-    return species_files
-
-
-# Function to load embeddings from file
-def load_embeddings(file_path):
-    """
-    Load pre-extracted embeddings from a pickle file
-    Each file contains a list of embeddings, where each embedding is a 1D array of length 1024
-    """
-    try:
-        with open(file_path, 'rb') as f:
-            embeddings = pickle.load(f)
-
-        # Check if embeddings is a list
-        if not isinstance(embeddings, list):
-            print(f"WARNING: Expected a list, got {type(embeddings)} from {file_path}")
-            return None
-
-        # Filter out any invalid embeddings
-        valid_embeddings = []
-        for i, embedding in enumerate(embeddings):
-            valid_embeddings.append(embedding['embedding'])
-
-        if len(valid_embeddings) == 0:
-            print(f"WARNING: No valid embeddings found in {file_path}")
-            return None
-
-        print(f"Loaded {len(valid_embeddings)} valid embeddings from {file_path}")
-        return valid_embeddings
-
-    except Exception as e:
-        print(f"Error loading embeddings from {file_path}: {e}")
-        return None
-
-
-# Function to prepare dataset with stratified k-fold splitting
-def prepare_kfold_datasets(species_files, n_splits=5, random_state=42):
-    """
-    Load all embeddings and prepare datasets for stratified k-fold cross-validation
-    ensuring each species is evenly distributed across folds
-    """
-    all_embeddings = []
-    all_labels = []
-    all_stratify_labels = []  # For stratification
-
-    # For each species, load all embeddings
-    for species_idx, (species, files) in enumerate(species_files.items()):
-        # Count embeddings for this species
-        species_embeddings = []
-
-        # Load all embeddings for this species
-        print(f"Loading embeddings for species: {species}")
-        for file_path in files:
-            embeddings = load_embeddings(file_path)
-            if embeddings is not None and len(embeddings) > 0:
-                species_embeddings.extend(embeddings)
-
-        # Check if we have embeddings for this species
-        if not species_embeddings:
-            print(f"WARNING: No valid embeddings for species '{species}'. Skipping.")
-            continue
-
-        # Add embeddings and labels
-        num_embeddings = len(species_embeddings)
-        all_embeddings.extend(species_embeddings)
-        all_labels.extend([species] * num_embeddings)
-        all_stratify_labels.extend([species_idx] * num_embeddings)  # Use species index for stratification
-
-        print(f"  - Added {num_embeddings} embeddings for species {species}")
-
-    # Check if we have any data left
-    if not all_embeddings:
-        raise ValueError("After loading embeddings, no data remains for training.")
-
-    # Verify that all embeddings have the correct shape before creating the array
-    embedding_length = 1024
-    valid_embeddings = []
-    valid_labels = []
-    valid_stratify_labels = []
-
-    print("Verifying embedding dimensions...")
-    for i, (embedding, label, stratify_label) in enumerate(zip(all_embeddings, all_labels, all_stratify_labels)):
-        if hasattr(embedding, 'shape') and embedding.shape == (embedding_length,):
-            valid_embeddings.append(embedding)
-            valid_labels.append(label)
-            valid_stratify_labels.append(stratify_label)
-        else:
-            shape_info = embedding.shape if hasattr(embedding, 'shape') else type(embedding)
-            print(f"WARNING: Removing embedding {i} with invalid shape: {shape_info}")
-
-    if len(valid_embeddings) == 0:
-        raise ValueError("No valid embeddings remain after validation.")
-
-    # Convert to numpy arrays
-    try:
-        all_embeddings_array = np.stack(valid_embeddings)
-        print(f"Successfully created embeddings array with shape: {all_embeddings_array.shape}")
-    except Exception as e:
-        print("Error creating embeddings array:", e)
-        # Print debugging information
-        for i, emb in enumerate(valid_embeddings[:5]):
-            print(f"Embedding {i} type: {type(emb)}")
-            if hasattr(emb, 'shape'):
-                print(f"Embedding {i} shape: {emb.shape}")
-            if hasattr(emb, 'dtype'):
-                print(f"Embedding {i} dtype: {emb.dtype}")
-        raise ValueError("Failed to create embeddings array. See above error.")
-
-    all_stratify_labels = np.array(valid_stratify_labels)
-
-    print(f"Total dataset: {len(valid_embeddings)} embeddings from {len(set(valid_labels))} species")
-    print(f"Embedding shape: {all_embeddings_array.shape}")
-
-    # Create stratified k-fold splitter
-    kfold = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-
-    return all_embeddings_array, valid_labels, kfold, all_stratify_labels
-
-
-# Function to prepare embeddings and labels for a specific fold
-def prepare_fold_data(embeddings, labels, train_indices, val_indices):
-    """
-    Prepare embeddings and labels for a specific fold from pre-loaded embeddings
-    """
-    # Check if indices are valid
-    if len(train_indices) == 0:
-        raise ValueError("No training indices provided")
-    if len(val_indices) == 0:
-        raise ValueError("No validation indices provided")
-
-    # Split embeddings and labels
-    train_embeddings = embeddings[train_indices]
-    train_labels = [labels[i] for i in train_indices]
-    val_embeddings = embeddings[val_indices]
-    val_labels = [labels[i] for i in val_indices]
-
-    # Check if embeddings are properly formed
-    print(f"Train embeddings shape: {train_embeddings.shape}")
-    print(f"Validation embeddings shape: {val_embeddings.shape}")
-
-    # Create label encoder
-    label_encoder = LabelEncoder()
-    all_labels = train_labels + val_labels
-    label_encoder.fit(all_labels)
-
-    # Encode labels
-    train_encoded_labels = label_encoder.transform(train_labels)
-    val_encoded_labels = label_encoder.transform(val_labels)
-
-    print(f"Prepared {len(train_embeddings)} training and {len(val_embeddings)} validation embeddings")
-    print(f"Number of classes: {len(label_encoder.classes_)}")
-
-    return train_embeddings, train_encoded_labels, val_embeddings, val_encoded_labels, label_encoder
-
-
-# Function to create TensorFlow dataset
-def create_tf_dataset(embeddings, labels, batch_size=32, is_training=False):
-    # Convert to TensorFlow dataset
-    dataset = tf.data.Dataset.from_tensor_slices((embeddings, labels))
-
-    # Shuffle if training
-    if is_training:
-        dataset = dataset.shuffle(buffer_size=len(embeddings))
-
-    # Batch and prefetch
-    dataset = dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
-
-    return dataset
 
 
 def create_model(input_dim=1024, num_classes=61, dropout_rate=0.3):
@@ -499,116 +306,181 @@ def evaluate_ensemble_model(ensemble_model, val_datasets, label_encoders, output
     return accuracy, report
 
 
-def main():
-    print("Starting bird species classification training with stratified k-fold cross-validation")
-    print(f"Configuration: {N_SPLITS} folds, {BATCH_SIZE} batch size, {EPOCHS} max epochs")
-    print(f"Using ensemble model: {USE_ENSEMBLE}")
+def check_fold_status(n_splits):
+    """
+    Check which folds are already trained and which need training.
 
-    # Step 1: Collect embedding files for each species
-    print("Collecting embedding files...")
-    species_files = collect_embedding_files(EMBEDDINGS_DIR)
+    Args:
+        n_splits: Total number of folds to check
 
-    # Print summary of collected files
-    print(f"Found {len(species_files)} species with embedding files:")
-    for species, files in species_files.items():
-        print(f"  - {species}: {len(files)} files")
+    Returns:
+        tuple: (already_trained, remaining_folds) lists of fold indices
+    """
+    train_dir = "train"
+    os.makedirs(train_dir, exist_ok=True)
 
-    # Step 2: Load all embeddings and prepare for stratified k-fold cross-validation
-    print(f"\nLoading all embeddings and preparing {N_SPLITS}-fold stratified cross-validation...")
-    all_embeddings, all_labels, kfold, stratify_labels = prepare_kfold_datasets(
-        species_files, n_splits=N_SPLITS, random_state=RANDOM_STATE
-    )
+    already_trained = []
+    remaining_folds = []
 
-    # Track metrics across folds
-    fold_accuracies = []
-    fold_histories = []
-    all_reports = []
+    for fold_idx in range(n_splits):
+        model_file = os.path.join(train_dir, f"species_classifier_fold{fold_idx + 1}.keras")
+        fold_file = os.path.join(train_dir, f"fold_{fold_idx + 1}.pkl")
 
-    # Store models and data for ensemble
-    fold_models = []
-    val_datasets = []
-    label_encoders = []
+        if os.path.exists(model_file):
+            print(f"Fold {fold_idx + 1} already trained. Skipping.")
+            already_trained.append(fold_idx)
+        elif os.path.exists(fold_file):
+            print(f"Fold {fold_idx + 1} has prepared data but not trained yet.")
+            remaining_folds.append(fold_idx)
+        else:
+            print(f"Fold {fold_idx + 1} needs data preparation and training.")
+            remaining_folds.append(fold_idx)
 
-    # Step 3: Perform stratified k-fold cross-validation
-    for fold, (train_idx, val_idx) in enumerate(kfold.split(all_embeddings, stratify_labels)):
-        print(f"\n===== Fold {fold + 1}/{N_SPLITS} =====")
+    print(f"Already trained folds: {already_trained}")
+    print(f"Remaining folds to train: {remaining_folds}")
 
-        # Prepare data for this fold
-        train_embeddings, train_labels, val_embeddings, val_labels, label_encoder = prepare_fold_data(
-            all_embeddings, all_labels, train_idx, val_idx
-        )
+    return already_trained, remaining_folds
 
-        # Check if we have enough data to continue
-        if len(train_embeddings) == 0 or len(val_embeddings) == 0:
-            print(f"Skipping fold {fold + 1} due to insufficient valid embeddings.")
-            continue
 
-        # Get input dimension and number of classes
-        if len(train_embeddings.shape) < 2:
-            print(f"ERROR: Train embeddings has invalid shape: {train_embeddings.shape}")
-            print("Sample of train embeddings:")
-            for i in range(min(5, len(train_embeddings))):
-                print(f"  Embedding {i}: {train_embeddings[i]}")
-            continue
+def train_fold(fold_idx, fold_data, batch_size, epochs, output_dir):
+    """
+    Train a model for a specific fold.
 
-        input_dim = train_embeddings.shape[1]
-        num_classes = len(label_encoder.classes_)
+    Args:
+        fold_idx: Index of the fold
+        fold_data: Tuple containing training and validation data
+        batch_size: Batch size for training
+        epochs: Maximum number of epochs
+        output_dir: Directory to save outputs
 
-        # Create TensorFlow datasets
-        train_dataset = create_tf_dataset(train_embeddings, train_labels, BATCH_SIZE, is_training=True)
-        val_dataset = create_tf_dataset(val_embeddings, val_labels, BATCH_SIZE)
+    Returns:
+        tuple: (model, history, accuracy, report, val_dataset, label_encoder) results of training
+    """
+    print(f"\n===== Fold {fold_idx + 1}/{N_SPLITS} =====")
 
-        # Train model
-        print(f"\nTraining model for fold {fold + 1}...")
-        model, history = train_model(train_dataset, val_dataset, input_dim, num_classes, fold + 1, epochs=EPOCHS)
+    train_embeddings, train_labels, val_embeddings, val_labels, label_encoder = fold_data
 
-        # Evaluate model
-        print(f"\nEvaluating model for fold {fold + 1}...")
-        accuracy, report, pred_species, true_species = evaluate_model(model, val_dataset, label_encoder)
+    # Check if we have enough data to continue
+    if len(train_embeddings) == 0 or len(val_embeddings) == 0:
+        print(f"Skipping fold {fold_idx + 1} due to insufficient valid embeddings.")
+        return None, None, None, None, None, None
 
-        # Print summary for this fold
-        print(f"\nFold {fold + 1} Results:")
-        print(f"Validation Accuracy: {accuracy:.4f}")
+    # Get input dimension and number of classes
+    if len(train_embeddings.shape) < 2:
+        print(f"ERROR: Train embeddings has invalid shape: {train_embeddings.shape}")
+        print("Sample of train embeddings:")
+        for i in range(min(5, len(train_embeddings))):
+            print(f"  Embedding {i}: {train_embeddings[i]}")
+        return None, None, None, None, None, None
 
-        # Print top 5 misclassified species (if any misclassifications exist)
-        misclassified = pd.DataFrame({
-            'true': true_species,
-            'predicted': pred_species
-        })
-        misclassified = misclassified[misclassified['true'] != misclassified['predicted']]
-        if len(misclassified) > 0:
-            print("\nTop misclassified species:")
-            top_errors = misclassified.groupby(['true', 'predicted']).size().reset_index(name='count')
-            top_errors = top_errors.sort_values('count', ascending=False).head(5)
-            print(top_errors)
+    input_dim = train_embeddings.shape[1]
+    num_classes = len(label_encoder.classes_)
 
-        # Store results
-        fold_accuracies.append(accuracy)
-        fold_histories.append(history)
-        all_reports.append(report)
+    # Create TensorFlow datasets
+    train_dataset = create_tf_dataset(train_embeddings, train_labels, batch_size, is_training=True)
+    val_dataset = create_tf_dataset(val_embeddings, val_labels, batch_size)
 
-        # Store model and data for ensemble
-        fold_models.append(model)
-        val_datasets.append(val_dataset)
-        label_encoders.append(label_encoder)
+    # Train model
+    print(f"\nTraining model for fold {fold_idx + 1}...")
+    model, history = train_model(train_dataset, val_dataset, input_dim, num_classes, fold_idx + 1, epochs=epochs)
 
-        # Plot training history
-        plot_history(history, fold + 1)
+    # Evaluate model
+    print(f"\nEvaluating model for fold {fold_idx + 1}...")
+    accuracy, report, pred_species, true_species = evaluate_model(model, val_dataset, label_encoder)
 
-        # Save model and label encoder for this fold in deployment-friendly format
-        # Save using the model.save method to include Keras metadata
-        model.save(f'{OUTPUT_DIR}/species_classifier_fold{fold + 1}_keras')
+    # Print summary for this fold
+    print(f"\nFold {fold_idx + 1} Results:")
+    print(f"Validation Accuracy: {accuracy:.4f}")
 
-        # Also save in SavedModel format if needed for other purposes
-        tf.saved_model.save(model, f'{OUTPUT_DIR}/species_classifier_fold{fold + 1}')
+    # Print top 5 misclassified species (if any misclassifications exist)
+    misclassified = pd.DataFrame({
+        'true': true_species,
+        'predicted': pred_species
+    })
+    misclassified = misclassified[misclassified['true'] != misclassified['predicted']]
+    if len(misclassified) > 0:
+        print("\nTop misclassified species:")
+        top_errors = misclassified.groupby(['true', 'predicted']).size().reset_index(name='count')
+        top_errors = top_errors.sort_values('count', ascending=False).head(5)
+        print(top_errors)
 
-        # Save label encoder
-        with open(f'{OUTPUT_DIR}/species_label_encoder_fold{fold + 1}.pkl', 'wb') as f:
-            pickle.dump(label_encoder, f)
+    # Plot training history
+    plot_history(history, fold_idx + 1)
 
-    # Step 4: Summarize results across all folds
+    # Save model and label encoder for this fold in deployment-friendly format
+    # Save using the model.save method to include Keras metadata
+    model.save(f'{output_dir}/species_classifier_fold{fold_idx + 1}_keras')
+
+    # Also save in SavedModel format if needed for other purposes
+    tf.saved_model.save(model, f'{output_dir}/species_classifier_fold{fold_idx + 1}')
+
+    # Save label encoder
+    with open(f'{output_dir}/species_label_encoder_fold{fold_idx + 1}.pkl', 'wb') as f:
+        pickle.dump(label_encoder, f)
+
+    return model, history, accuracy, report, val_dataset, label_encoder
+
+
+def load_trained_fold(fold_idx, train_dir, batch_size):
+    """
+    Load a previously trained model and its associated data.
+
+    Args:
+        fold_idx: Index of the fold to load
+        train_dir: Directory where fold data is stored
+        batch_size: Batch size for validation dataset
+
+    Returns:
+        tuple: (model, accuracy, report, val_dataset, label_encoder) loaded data
+    """
+    try:
+        # Load the model
+        model_path = os.path.join(train_dir, f"species_classifier_fold{fold_idx + 1}_keras")
+        print(f"Loading model for fold {fold_idx + 1} from {model_path}...")
+        custom_objects = {'custom_loss': custom_loss}
+        model = tf.keras.models.load_model(model_path, custom_objects=custom_objects)
+
+        # Load label encoder
+        le_path = os.path.join(train_dir, f"species_label_encoder_fold{fold_idx + 1}.pkl")
+        with open(le_path, 'rb') as f:
+            label_encoder = pickle.load(f)
+
+        # Load fold data to recreate validation dataset
+        fold_file = os.path.join(train_dir, f"fold_{fold_idx + 1}.pkl")
+        with open(fold_file, "rb") as f:
+            fold_data = pickle.load(f)
+
+        # Recreate validation dataset
+        _, _, val_embeddings, val_labels, _ = fold_data
+        val_dataset = create_tf_dataset(val_embeddings, val_labels, batch_size)
+
+        # Get accuracy for reporting
+        accuracy, report, _, _ = evaluate_model(model, val_dataset, label_encoder)
+
+        print(f"Loaded fold {fold_idx + 1} model with validation accuracy: {accuracy:.4f}")
+        return model, accuracy, report, val_dataset, label_encoder
+
+    except Exception as e:
+        print(f"Error loading model for fold {fold_idx + 1}: {e}")
+        return None, None, None, None, None
+
+
+def summarize_results(fold_accuracies, all_reports, output_dir):
+    """
+    Summarize results across all folds and save the best model.
+
+    Args:
+        fold_accuracies: List of validation accuracies for each fold
+        all_reports: List of classification reports for each fold
+        output_dir: Directory to save outputs
+    """
     print("\n===== Stratified K-Fold Cross-Validation Summary =====")
     print(f"Number of folds: {len(fold_accuracies)}")
+
+    if not fold_accuracies:
+        print("No valid fold results to summarize.")
+        return
+
     print(f"Average Validation Accuracy: {np.mean(fold_accuracies):.4f} ± {np.std(fold_accuracies):.4f}")
     print(f"Individual Fold Accuracies: {[f'{acc:.4f}' for acc in fold_accuracies]}")
 
@@ -637,78 +509,178 @@ def main():
             print(f"  Weighted {metric}: {np.mean(values):.4f} ± {np.std(values):.4f}")
 
     # Save best model based on validation accuracy
-    if fold_accuracies:
-        import shutil
-        best_fold = np.argmax(fold_accuracies) + 1
-        print(f"\nBest performing model was from fold {best_fold} with accuracy {fold_accuracies[best_fold - 1]:.4f}")
+    import shutil
+    best_fold = np.argmax(fold_accuracies) + 1
+    print(f"\nBest performing model was from fold {best_fold} with accuracy {fold_accuracies[best_fold - 1]:.4f}")
 
-        # Copy the best Keras model file
-        if os.path.exists(f'{OUTPUT_DIR}/species_classifier_fold{best_fold}_keras'):
-            # Copy the Keras model directory
-            if os.path.exists(f'{OUTPUT_DIR}/species_classifier_final'):
-                shutil.rmtree(f'{OUTPUT_DIR}/species_classifier_final')
-            shutil.copytree(f'{OUTPUT_DIR}/species_classifier_fold{best_fold}_keras',
-                            f'{OUTPUT_DIR}/species_classifier_final')
-            print(f"Copied Keras model from fold {best_fold} to final")
+    # Copy the best Keras model file
+    if os.path.exists(f'{output_dir}/species_classifier_fold{best_fold}_keras'):
+        # Copy the Keras model directory
+        if os.path.exists(f'{output_dir}/species_classifier_final'):
+            shutil.rmtree(f'{output_dir}/species_classifier_final')
+        shutil.copytree(f'{output_dir}/species_classifier_fold{best_fold}_keras',
+                        f'{output_dir}/species_classifier_final')
+        print(f"Copied Keras model from fold {best_fold} to final")
 
-        # Copy label encoder
-        shutil.copy(f'{OUTPUT_DIR}/species_label_encoder_fold{best_fold}.pkl',
-                    f'{OUTPUT_DIR}/species_label_encoder_final.pkl')
-        print(f"Copied label encoder from fold {best_fold} to final")
+    # Copy label encoder
+    shutil.copy(f'{output_dir}/species_label_encoder_fold{best_fold}.pkl',
+                f'{output_dir}/species_label_encoder_final.pkl')
+    print(f"Copied label encoder from fold {best_fold} to final")
+
+
+def create_final_tflite_model(output_dir):
+    """
+    Create TFLite version of the best individual model.
+
+    Args:
+        output_dir: Directory where the best model is saved
+    """
+    print("\nCreating TFLite version of the best individual model...")
+
+    # Use tf.keras.models.load_model instead of tf.saved_model.load
+    custom_objects = {'custom_loss': custom_loss}
+    best_model = tf.keras.models.load_model(
+        f'{output_dir}/species_classifier_final',
+        custom_objects=custom_objects
+    )
+
+    # Convert to TFLite (with optimization for size and latency)
+    converter = tf.lite.TFLiteConverter.from_keras_model(best_model)
+    converter.optimizations = [tf.lite.Optimize.DEFAULT]
+    tflite_model = converter.convert()
+
+    # Save TFLite model
+    with open(f'{output_dir}/species_classifier_final.tflite', 'wb') as f:
+        f.write(tflite_model)
+
+    print(f"TFLite version of best model saved to {output_dir}/species_classifier_final.tflite")
+
+
+def create_and_evaluate_ensemble(fold_models, val_datasets, label_encoders, input_dim, output_dir, best_fold_acc):
+    """
+    Create and evaluate an ensemble model from multiple fold models.
+
+    Args:
+        fold_models: List of trained models from each fold
+        val_datasets: List of validation datasets for each fold
+        label_encoders: List of label encoders for each fold
+        input_dim: Input dimension for the model
+        output_dir: Directory to save outputs
+        best_fold_acc: Accuracy of the best individual fold model
+    """
+    print("\n===== Creating and Evaluating Ensemble Model =====")
+
+    # Create ensemble model
+    ensemble_model = create_ensemble_model(fold_models, input_dim, output_dir)
+
+    # Evaluate ensemble model
+    ensemble_acc, ensemble_report = evaluate_ensemble_model(
+        ensemble_model,
+        val_datasets,
+        label_encoders,
+        output_dir
+    )
+
+    # Compare with best single model
+    print(f"\nModel Comparison:")
+    print(f"  Best Single Model Accuracy: {best_fold_acc:.4f}")
+    print(f"  Ensemble Model Accuracy: {ensemble_acc:.4f}")
+
+    # Report improvement or decline
+    diff = ensemble_acc - best_fold_acc
+    if diff > 0:
+        print(f"  Ensemble improves accuracy by {diff:.4f} ({diff * 100:.2f}%)")
     else:
-        print("No valid fold models were trained.")
+        print(f"  Ensemble reduces accuracy by {abs(diff):.4f} ({abs(diff) * 100:.2f}%)")
+
+
+def main():
+    """
+    Main function for bird species classification training with stratified k-fold cross-validation.
+    """
+    print("Starting bird species classification training with stratified k-fold cross-validation")
+    print(f"Configuration: {N_SPLITS} folds, {BATCH_SIZE} batch size, {EPOCHS} max epochs")
+    print(f"Using ensemble model: {USE_ENSEMBLE}")
+
+    # Check which folds need training
+    already_trained, remaining_folds = check_fold_status(N_SPLITS)
+
+    # Get data only for remaining folds
+    fold_generator = prepare_data(remaining_folds if len(remaining_folds) < N_SPLITS else None)
+
+    # Track metrics across folds
+    fold_accuracies = []
+    fold_histories = []
+    all_reports = []
+
+    # Store models and data for ensemble
+    fold_models = []
+    val_datasets = []
+    label_encoders = []
+    input_dim = None
+
+    # Train remaining folds
+    for fold_idx, fold_data in fold_generator:
+        model, history, accuracy, report, val_dataset, label_encoder = train_fold(
+            fold_idx, fold_data, BATCH_SIZE, EPOCHS, OUTPUT_DIR
+        )
+
+        if model is None:
+            continue
+
+        # Store results
+        fold_accuracies.append(accuracy)
+        fold_histories.append(history)
+        all_reports.append(report)
+
+        # Store model and data for ensemble
+        fold_models.append(model)
+        val_datasets.append(val_dataset)
+        label_encoders.append(label_encoder)
+
+        # Capture input dimension for ensemble model
+        if input_dim is None:
+            input_dim = model.input_shape[1]
+
+    # Load already trained models for ensemble if needed
+    if USE_ENSEMBLE and already_trained:
+        print("\n===== Loading already trained models for ensemble =====")
+
+        for fold_idx in already_trained:
+            model, accuracy, report, val_dataset, label_encoder = load_trained_fold(
+                fold_idx, OUTPUT_DIR, BATCH_SIZE
+            )
+
+            if model is None:
+                continue
+
+            # Store for ensemble
+            fold_models.append(model)
+            val_datasets.append(val_dataset)
+            label_encoders.append(label_encoder)
+            fold_accuracies.append(accuracy)
+            all_reports.append(report)
+
+            # Capture input dimension for ensemble model
+            if input_dim is None:
+                input_dim = model.input_shape[1]
+
+    # Summarize results
+    summarize_results(fold_accuracies, all_reports, OUTPUT_DIR)
 
     # Create and evaluate ensemble model if enabled
     if USE_ENSEMBLE and len(fold_models) > 1:
-        print("\n===== Creating and Evaluating Ensemble Model =====")
-
-        # Create ensemble model
-        ensemble_model = create_ensemble_model(fold_models, input_dim, OUTPUT_DIR)
-
-        # Evaluate ensemble model
-        ensemble_acc, ensemble_report = evaluate_ensemble_model(
-            ensemble_model,
-            val_datasets,
-            label_encoders,
-            OUTPUT_DIR
+        best_fold_acc = max(fold_accuracies) if fold_accuracies else 0
+        create_and_evaluate_ensemble(
+            fold_models, val_datasets, label_encoders, input_dim, OUTPUT_DIR, best_fold_acc
         )
-
-        # Compare with best single model
-        best_fold_acc = max(fold_accuracies)
-        print(f"\nModel Comparison:")
-        print(f"  Best Single Model Accuracy: {best_fold_acc:.4f}")
-        print(f"  Ensemble Model Accuracy: {ensemble_acc:.4f}")
-
-        # Report improvement or decline
-        diff = ensemble_acc - best_fold_acc
-        if diff > 0:
-            print(f"  Ensemble improves accuracy by {diff:.4f} ({diff * 100:.2f}%)")
-        else:
-            print(f"  Ensemble reduces accuracy by {abs(diff):.4f} ({abs(diff) * 100:.2f}%)")
 
         # Create TFLite version of best individual model
-        print("\nCreating TFLite version of the best individual model...")
-
-        # Use tf.keras.models.load_model instead of tf.saved_model.load
-        custom_objects = {'custom_loss': custom_loss}
-        best_model = tf.keras.models.load_model(
-            f'{OUTPUT_DIR}/species_classifier_final',
-            custom_objects=custom_objects
-        )
-
-        # Convert to TFLite (with optimization for size and latency)
-        converter = tf.lite.TFLiteConverter.from_keras_model(best_model)
-        converter.optimizations = [tf.lite.Optimize.DEFAULT]
-        tflite_model = converter.convert()
-
-        # Save TFLite model
-        with open(f'{OUTPUT_DIR}/species_classifier_final.tflite', 'wb') as f:
-            f.write(tflite_model)
-
-        print(f"TFLite version of best model saved to {OUTPUT_DIR}/species_classifier_final.tflite")
+        create_final_tflite_model(OUTPUT_DIR)
 
     print("\nTraining and evaluation complete!")
 
 
 if __name__ == "__main__":
+    OUTPUT_DIR = "train"
     main()
