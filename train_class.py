@@ -27,40 +27,47 @@ USE_ENSEMBLE = True  # Enable/disable ensemble model creation
 OUTPUT_DIR = "train"
 
 
-def create_model(input_dim=1024, num_classes=61, dropout_rate=0.3):
-    """Create a classification model for transfer learning from embeddings"""
-    model = models.Sequential([
-        layers.Input(shape=(input_dim,), name='input_embeddings'),
+def create_model(input_dim=1024, num_classes=206, dropout_rate=0.3):
+    """Create an optimized bird species classification model"""
+    inputs = layers.Input(shape=(input_dim,), name='input_embeddings')
 
-        # First hidden layer with BatchNorm and regularization
-        layers.Dense(128, kernel_regularizer=regularizers.l2(0.001)),
-        layers.BatchNormalization(),
-        layers.Activation('relu'),
-        layers.Dropout(dropout_rate),
+    # First block with larger units
+    x = layers.Dense(512, kernel_regularizer=regularizers.l2(0.0005))(inputs)
+    x = layers.BatchNormalization()(x)
+    x = layers.LeakyReLU(alpha=0.1)(x)
+    x = layers.Dropout(dropout_rate)(x)
 
-        # Second hidden layer
-        layers.Dense(64, kernel_regularizer=regularizers.l2(0.001)),
-        layers.BatchNormalization(),
-        layers.Activation('relu'),
-        layers.Dropout(dropout_rate),
+    # Second block
+    x = layers.Dense(256, kernel_regularizer=regularizers.l2(0.0005))(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.LeakyReLU(alpha=0.1)(x)
+    x = layers.Dropout(dropout_rate)(x)
 
-        # Output layer - NO activation here to match BirdNET's approach
-        layers.Dense(num_classes, name='species_logits')
-    ])
+    # Third block
+    x = layers.Dense(128, kernel_regularizer=regularizers.l2(0.0005))(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.LeakyReLU(alpha=0.1)(x)
+    x = layers.Dropout(dropout_rate)(x)
 
-    # Learning rate schedule
-    lr_schedule = optimizers.schedules.ExponentialDecay(
+    # Output layer
+    outputs = layers.Dense(num_classes, name='species_logits')(x)
+
+    model = tf.keras.Model(inputs=inputs, outputs=outputs)
+
+    # One-cycle learning rate schedule
+    lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(
         initial_learning_rate=0.001,
-        decay_steps=1000,
-        decay_rate=0.9,
-        staircase=True
+        first_decay_steps=1000,
+        t_mul=2.0,
+        m_mul=0.9,
+        alpha=0.1
     )
 
-    # Compile model
+    # Compile with SparseCategoricalCrossentropy instead of CategoricalCrossentropy
     model.compile(
-        optimizer=optimizers.Adam(learning_rate=lr_schedule),
-        loss=custom_loss,
-        metrics=['accuracy']
+        optimizer=tf.keras.optimizers.Adam(learning_rate=lr_schedule),
+        loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        metrics=['accuracy', tf.keras.metrics.SparseTopKCategoricalAccuracy(k=3, name='top3_acc')]
     )
 
     return model
@@ -386,7 +393,7 @@ def train_fold(fold_idx, fold_data, batch_size, epochs, output_dir):
 
 def load_trained_fold(fold_idx, train_dir, batch_size):
     """
-    Load a previously trained model and its associated data.
+    Load a previously trained model and its associated data without evaluation.
 
     Args:
         fold_idx: Index of the fold to load
@@ -394,7 +401,7 @@ def load_trained_fold(fold_idx, train_dir, batch_size):
         batch_size: Batch size for validation dataset
 
     Returns:
-        tuple: (model, accuracy, report, val_dataset, label_encoder) loaded data
+        tuple: (model, val_dataset, label_encoder) loaded data
     """
     try:
         # Load the model
@@ -417,15 +424,12 @@ def load_trained_fold(fold_idx, train_dir, batch_size):
         _, _, val_embeddings, val_labels, _ = fold_data
         val_dataset = create_tf_dataset(val_embeddings, val_labels, batch_size)
 
-        # Get accuracy for reporting
-        accuracy, report, _, _ = evaluate_model(model, val_dataset, label_encoder)
-
-        print(f"Loaded fold {fold_idx + 1} model with validation accuracy: {accuracy:.4f}")
-        return model, accuracy, report, val_dataset, label_encoder
+        print(f"Successfully loaded fold {fold_idx + 1} model")
+        return model, val_dataset, label_encoder
 
     except Exception as e:
         print(f"Error loading model for fold {fold_idx + 1}: {e}")
-        return None, None, None, None, None
+        return None, None, None
 
 
 def summarize_results(fold_accuracies, all_reports, output_dir):
@@ -569,7 +573,7 @@ def main():
     already_trained, remaining_folds = check_fold_status(OUTPUT_DIR, N_SPLITS)
 
     # Get data only for remaining folds
-    fold_generator = prepare_data(remaining_folds if len(remaining_folds) < N_SPLITS else None)
+    fold_generator = prepare_data(remaining_folds)
 
     # Track metrics across folds
     fold_accuracies = []
@@ -610,7 +614,7 @@ def main():
         print("\n===== Loading already trained models for ensemble =====")
 
         for fold_idx in already_trained:
-            model, accuracy, report, val_dataset, label_encoder = load_trained_fold(
+            model, val_dataset, label_encoder = load_trained_fold(
                 fold_idx, OUTPUT_DIR, BATCH_SIZE
             )
 
@@ -621,15 +625,13 @@ def main():
             fold_models.append(model)
             val_datasets.append(val_dataset)
             label_encoders.append(label_encoder)
-            fold_accuracies.append(accuracy)
-            all_reports.append(report)
 
             # Capture input dimension for ensemble model
             if input_dim is None:
                 input_dim = model.input_shape[1]
 
     # Summarize results
-    summarize_results(fold_accuracies, all_reports, OUTPUT_DIR)
+    # summarize_results(fold_accuracies, all_reports, OUTPUT_DIR)
 
     # Create and evaluate ensemble model if enabled
     if USE_ENSEMBLE and len(fold_models) > 1:
