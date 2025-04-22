@@ -10,8 +10,8 @@ if __name__ == "__main__":
     utils.TRAIN_DIR = "/home/mikhail/prj/bc_25_data/train_audio"
     birdnet.CSV_PATH = "/home/mikhail/prj/bc_25_data/taxonomy.csv"
 
-    embeddings.EMB_MODEL_PATH = "/home/mikhail/prj/bird_clef_25/train/species_classifier_final.tflite"
-    embeddings.EMB_LABEL_ENCODER_PATH = "/home/mikhail/prj/bird_clef_25/train/species_label_encoder_final.pkl"
+    embeddings.EMB_MODEL_PATH = "/home/mikhail/prj/bird_clef_25/train/species_classifier_ensemble.tflite"
+    embeddings.EMB_LABEL_ENCODER_PATH = "/home/mikhail/prj/bird_clef_25/train/species_label_encoder_ensemble.pkl"
     birdnet.USE_EMBEDDINGS = True
     birdnet.USE_BN = False
 

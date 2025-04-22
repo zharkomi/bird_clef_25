@@ -182,19 +182,10 @@ def process_species_audio(species_list=SPECIES,
                 # Check if this file has voice segments
                 full_path = os.path.join(species_id, file_name)
 
-                voice_segments = []
-                # Check different possible keys for the voice data
-                key_format = f'/kaggle/input/birdclef-2025/train_audio/{full_path}'
-                if key_format in voice_data:
-                    voice_segments = voice_data[key_format]
-
-                # Remove voice segments if present
-                if voice_segments:
-                    print(f"Removing {len(voice_segments)} voice segments from {file_name}")
-                    audio = remove_voice_segments(audio, sr, voice_segments)
+                audio = remove_voice(audio, file_name, full_path, sr, voice_data)
 
                 # Split into overlapping chunks
-                chunks = split_into_chunks(audio, sr)
+                chunks = split_into_chunks(audio, sr, chunk_duration=3.0, overlap=0.0)
 
                 # Get embeddings for each chunk
                 embeddings = []
@@ -218,6 +209,19 @@ def process_species_audio(species_list=SPECIES,
             except Exception as e:
                 print(f"Error processing {file_path}: {e}")
                 continue
+
+
+def remove_voice(audio, file_name, full_path, sr, voice_data):
+    voice_segments = []
+    # Check different possible keys for the voice data
+    key_format = f'/kaggle/input/birdclef-2025/train_audio/{full_path}'
+    if key_format in voice_data:
+        voice_segments = voice_data[key_format]
+    # Remove voice segments if present
+    if voice_segments:
+        print(f"Removing {len(voice_segments)} voice segments from {file_name}")
+        audio = remove_voice_segments(audio, sr, voice_segments)
+    return audio
 
 
 if __name__ == "__main__":
