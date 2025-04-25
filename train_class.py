@@ -55,18 +55,17 @@ def create_model(input_dim=1024, num_classes=206, dropout_rate=0.3):
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
 
     # One-cycle learning rate schedule
-    lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(
+    lr_schedule = optimizers.schedules.ExponentialDecay(
         initial_learning_rate=0.001,
-        first_decay_steps=1000,
-        t_mul=2.0,
-        m_mul=0.9,
-        alpha=0.1
+        decay_steps=1000,
+        decay_rate=0.9,
+        staircase=True
     )
 
     # Compile with SparseCategoricalCrossentropy instead of CategoricalCrossentropy
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=lr_schedule),
-        loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        loss=custom_loss,
         metrics=['accuracy', tf.keras.metrics.SparseTopKCategoricalAccuracy(k=3, name='top3_acc')]
     )
 
@@ -573,7 +572,7 @@ def main():
     already_trained, remaining_folds = check_fold_status(OUTPUT_DIR, N_SPLITS)
 
     # Get data only for remaining folds
-    fold_generator = prepare_data(remaining_folds)
+    fold_generator = prepare_data(remaining_folds, False)
 
     # Track metrics across folds
     fold_accuracies = []
@@ -609,17 +608,30 @@ def main():
         if input_dim is None:
             input_dim = model.input_shape[1]
 
-    # Load already trained models for ensemble if needed
-    if USE_ENSEMBLE and already_trained:
-        print("\n===== Loading already trained models for ensemble =====")
+    # Load already trained models for ensemble
+    print("\n===== Loading all trained models for ensemble =====")
 
-        for fold_idx in already_trained:
+    # Clear previous lists if this is a re-run with only ensemble creation
+    if not remaining_folds:
+        fold_models = []
+        val_datasets = []
+        label_encoders = []
+        input_dim = None
+
+    # Load all existing fold models (both newly trained and previously trained)
+    for fold_idx in range(N_SPLITS):
+        # Check if the model exists
+        model_path = f'{OUTPUT_DIR}/species_classifier_fold{fold_idx + 1}_keras'
+        if os.path.exists(model_path):
             model, val_dataset, label_encoder = load_trained_fold(
                 fold_idx, OUTPUT_DIR, BATCH_SIZE
             )
 
             if model is None:
+                print(f"Could not load model for fold {fold_idx + 1}")
                 continue
+
+            print(f"Successfully loaded model for fold {fold_idx + 1}")
 
             # Store for ensemble
             fold_models.append(model)
@@ -630,20 +642,19 @@ def main():
             if input_dim is None:
                 input_dim = model.input_shape[1]
 
-    # Summarize results
-    # summarize_results(fold_accuracies, all_reports, OUTPUT_DIR)
+    # Show summary of loaded models
+    print(f"\nLoaded {len(fold_models)} fold models for ensemble creation")
 
-    # Create and evaluate ensemble model if enabled
-    if USE_ENSEMBLE and len(fold_models) > 1:
-        best_fold_acc = max(fold_accuracies) if fold_accuracies else 0
+    # Create and evaluate ensemble model if we have multiple folds
+    if len(fold_models) > 1:
+        print("\n===== Creating Ensemble Model =====")
         create_and_evaluate_ensemble(
-            fold_models, val_datasets, label_encoders, input_dim, OUTPUT_DIR, best_fold_acc
+            fold_models, val_datasets, label_encoders, input_dim, OUTPUT_DIR, 0.0
         )
+    else:
+        print("\nERROR: Need at least 2 models to create an ensemble, but found only", len(fold_models))
 
-        # Create TFLite version of best individual model
-        create_final_tflite_model(OUTPUT_DIR)
-
-    print("\nTraining and evaluation complete!")
+    print("\nEnsemble creation complete!")
 
 
 if __name__ == "__main__":

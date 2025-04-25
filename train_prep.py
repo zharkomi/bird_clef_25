@@ -400,7 +400,7 @@ def check_fold_status(output_dir, n_splits):
     return already_trained, remaining_folds
 
 
-def prepare_data(folds_to_train=None, use_chunk_kfold=True):
+def prepare_data(folds_to_train, use_chunk_kfold):
     """
     Prepares data for training, with the following behavior:
     - If files for all folds exist: load them from disk
