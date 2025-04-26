@@ -12,7 +12,7 @@ from audiomentations import (
 )
 
 from src.audio import parse_file
-from statistics import calculate_total_duration
+from file_statistics import calculate_total_duration
 
 
 def load_voice_data(pkl_path="/home/mikhail/prj/bird_clef_25/data/train_voice_data.pkl"):
@@ -105,6 +105,89 @@ def remove_voice(audio, file_name, full_path, sr, voice_data):
     return audio
 
 
+def extend_short_audio(audio, sr, min_duration=3.0, background_dir=None):
+    """
+    Extend audio files shorter than min_duration by adding background noise
+    or repeating the audio to reach the minimum duration.
+
+    Args:
+        audio: Audio array
+        sr: Sample rate
+        min_duration: Minimum duration in seconds
+        background_dir: Directory containing background noise files
+
+    Returns:
+        Extended audio that meets the minimum duration
+    """
+    # Calculate current duration in seconds
+    current_duration = len(audio) / sr
+
+    # If duration is already sufficient, return the original audio
+    if current_duration >= min_duration:
+        return audio
+
+    # Calculate how much audio to add in seconds
+    additional_duration_needed = min_duration - current_duration
+    print(f"Extending audio: current={current_duration:.2f}s, adding={additional_duration_needed:.2f}s")
+
+    # If background directory is provided and exists, use background sounds
+    if background_dir and os.path.exists(background_dir):
+        # Get all background files
+        bg_files = []
+        for root, _, files in os.walk(background_dir):
+            for file in files:
+                if file.endswith(('.wav', '.ogg', '.mp3')):
+                    bg_files.append(os.path.join(root, file))
+
+        if bg_files:
+            # Randomly select a background file
+            bg_file = random.choice(bg_files)
+            try:
+                # Load background audio
+                bg_sr, bg_audio = parse_file(bg_file)
+
+                # Resample background audio if needed
+                if bg_sr != sr:
+                    from librosa import resample
+                    bg_audio = resample(y=bg_audio, orig_sr=bg_sr, target_sr=sr)
+
+                # Ensure background audio is long enough
+                if len(bg_audio) < int(additional_duration_needed * sr):
+                    # Repeat background audio if necessary
+                    repetitions = int(np.ceil((additional_duration_needed * sr) / len(bg_audio)))
+                    bg_audio = np.tile(bg_audio, repetitions)
+
+                # Trim background audio to required length
+                bg_audio = bg_audio[:int(additional_duration_needed * sr)]
+
+                # Apply volume reduction to background audio
+                bg_volume_factor = 0.3  # 30% of original volume
+                bg_audio = bg_audio * bg_volume_factor
+
+                # Concatenate original audio with background
+                extended_audio = np.concatenate([audio, bg_audio])
+                return extended_audio
+
+            except Exception as e:
+                print(f"Error using background audio: {e}")
+                # Fall back to repeating original audio if background fails
+                pass
+
+    # If no background directory or an error occurred, repeat the original audio
+    if len(audio) == 0:
+        # If audio is empty (e.g., after voice removal), generate silence
+        extended_audio = np.zeros(int(min_duration * sr), dtype=np.float32)
+    else:
+        # Calculate how many times to repeat the audio
+        repetitions = int(np.ceil(min_duration / current_duration))
+        extended_audio = np.tile(audio, repetitions)
+
+        # Trim to required length
+        extended_audio = extended_audio[:int(min_duration * sr)]
+
+    return extended_audio
+
+
 def create_augmentation_pipeline(background_dir=None):
     """
     Create a pipeline of audio augmentations.
@@ -119,8 +202,8 @@ def create_augmentation_pipeline(background_dir=None):
         AddGaussianNoise(min_amplitude=0.001, max_amplitude=0.015, p=0.5),
         TimeStretch(min_rate=0.8, max_rate=1.25, p=0.5),
         PitchShift(min_semitones=-4, max_semitones=4, p=0.5),
-        Shift(min_fraction=-0.2, max_fraction=0.2, p=0.5),
-        Gain(min_gain_in_db=-12, max_gain_in_db=12, p=0.5),
+        Shift(min_shift=-0.2, max_shift=0.2, p=0.5),
+        Gain(min_gain_db=-12, max_gain_db=12, p=0.5),
         RoomSimulator(p=0.3)
     ]
 
@@ -129,8 +212,8 @@ def create_augmentation_pipeline(background_dir=None):
         augmentations.append(
             AddBackgroundNoise(
                 sounds_path=background_dir,
-                min_snr_in_db=3.0,
-                max_snr_in_db=30.0,
+                min_snr_db=3.0,
+                max_snr_db=30.0,
                 p=0.5
             )
         )
@@ -144,7 +227,8 @@ def create_diverse_augmentations(species_list=None,
                                  background_dir=None,
                                  augmentations_per_file=3,
                                  voice_data_path="/home/mikhail/prj/bird_clef_25/data/train_voice_data.pkl",
-                                 stats_csv=None):
+                                 stats_csv=None,
+                                 min_output_duration=3.0):
     """
     Create diverse augmentations for species with less than the minimum duration.
     This function creates multiple different augmentations for each file.
@@ -157,6 +241,7 @@ def create_diverse_augmentations(species_list=None,
         augmentations_per_file: Number of different augmentations to create per original file
         voice_data_path: Path to pickle file with voice segments
         stats_csv: Path to CSV with species statistics. If provided, use it to filter species.
+        min_output_duration: Minimum duration in seconds for each augmented file
     """
     # If stats_csv is provided, use it to determine which species need augmentation
     if stats_csv and os.path.exists(stats_csv):
@@ -202,14 +287,14 @@ def create_diverse_augmentations(species_list=None,
         ]),
 
         # Preset 3: Heavy augmentation
-        Compose([
-            AddGaussianNoise(min_amplitude=0.01, max_amplitude=0.03, p=0.8),
-            TimeStretch(min_rate=0.7, max_rate=1.3, p=0.8),
-            PitchShift(min_semitones=-4, max_semitones=4, p=0.8),
-            Shift(min_shift=-0.2, max_shift=0.2, p=0.7),
-            Gain(min_gain_db=-12, max_gain_db=12, p=0.7),
-            RoomSimulator(p=0.6)
-        ])
+        # Compose([
+        #     AddGaussianNoise(min_amplitude=0.01, max_amplitude=0.03, p=0.8),
+        #     TimeStretch(min_rate=0.7, max_rate=1.3, p=0.8),
+        #     PitchShift(min_semitones=-4, max_semitones=4, p=0.8),
+        #     Shift(min_fraction=-0.2, max_fraction=0.2, p=0.7),
+        #     Gain(min_gain_in_db=-12, max_gain_in_db=12, p=0.7),
+        #     RoomSimulator(p=0.6)
+        # ])
     ]
 
     # Add background noise augmenter if directory provided
@@ -281,10 +366,17 @@ def create_diverse_augmentations(species_list=None,
                 full_path = os.path.join(species_id, file_name)
                 audio = remove_voice(audio, file_name, full_path, sr, voice_data)
 
-                # Skip files that are too short after voice removal
-                if len(audio) < sr * 0.5:  # Skip if less than 0.5 seconds
-                    print(f"Skipping {file_name} - too short after voice removal")
+                # Check if audio is too short after voice removal
+                current_duration = len(audio) / sr
+                if current_duration < 0.5:  # If less than 0.5 seconds, skip
+                    print(f"Skipping {file_name} - too short after voice removal (only {current_duration:.2f}s)")
                     continue
+
+                # If audio is less than min_output_duration, extend it
+                if current_duration < min_output_duration:
+                    print(
+                        f"Extending audio file {file_name} from {current_duration:.2f}s to {min_output_duration:.2f}s")
+                    audio = extend_short_audio(audio, sr, min_output_duration, background_dir)
 
                 # Create multiple augmentations for this file
                 for aug_idx in range(augmentations_per_file):
@@ -297,6 +389,13 @@ def create_diverse_augmentations(species_list=None,
                     # Apply augmentations
                     augmented_audio = augmenter(samples=audio, sample_rate=sr)
 
+                    # Check if augmented audio is too short and extend if needed
+                    aug_duration = len(augmented_audio) / sr
+                    if aug_duration < min_output_duration:
+                        print(f"Extending augmented audio from {aug_duration:.2f}s to {min_output_duration:.2f}s")
+                        augmented_audio = extend_short_audio(augmented_audio, sr, min_output_duration, background_dir)
+                        aug_duration = len(augmented_audio) / sr
+
                     # Save the augmented audio
                     augmentation_count += 1
                     aug_file_name = f"{os.path.splitext(file_name)[0]}_aug_{augmentation_count}.ogg"
@@ -306,7 +405,6 @@ def create_diverse_augmentations(species_list=None,
                     sf.write(aug_file_path, augmented_audio, sr)
 
                     # Update the additional duration generated
-                    aug_duration = len(augmented_audio) / sr
                     additional_duration_generated += aug_duration
 
                     print(f"Generated augmented file {aug_file_name} ({aug_duration:.2f} seconds)")
@@ -327,6 +425,7 @@ if __name__ == "__main__":
     VOICE_DATA_PATH = "/home/mikhail/prj/bird_clef_25/data/train_voice_data.pkl"
     STATS_CSV = "species_statistics.csv"
     MIN_DURATION = 2400.0
+    MIN_OUTPUT_FILE_DURATION = 3.0  # Minimum duration for each augmented file
 
     # Check if statistics CSV exists
     if not os.path.exists(STATS_CSV):
@@ -345,7 +444,7 @@ if __name__ == "__main__":
     species_to_augment = stats_df[stats_df['total_duration'] < MIN_DURATION]['species_id'].tolist()
     print(f"Found {len(species_to_augment)} species that need augmentation")
 
-    # Use the advanced diverse augmentation approach with voice removal
+    # Use the advanced diverse augmentation approach with voice removal and extending short files
     create_diverse_augmentations(
         species_list=species_to_augment,  # Only augment species that need it
         train_dir=TRAIN_DIR,
@@ -353,7 +452,8 @@ if __name__ == "__main__":
         background_dir=BACKGROUND_DIR,
         augmentations_per_file=3,  # Create 3 different augmentations per original file
         voice_data_path=VOICE_DATA_PATH,
-        stats_csv=STATS_CSV  # Pass the statistics CSV
+        stats_csv=STATS_CSV,  # Pass the statistics CSV
+        min_output_duration=MIN_OUTPUT_FILE_DURATION  # Ensure all output files are at least 3 seconds
     )
 
     # After augmentation, recalculate statistics to confirm we met our targets
