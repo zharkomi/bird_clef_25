@@ -4,15 +4,15 @@ import pickle
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-import librosa
 import soundfile as sf
+
 from audiomentations import (
     Compose, AddGaussianNoise, TimeStretch, PitchShift,
     Shift, Gain, RoomSimulator, AddBackgroundNoise
 )
 
 from src.audio import parse_file
-from src.birdnet import get_analyzer, analyze_chunk, get_embedding
+from statistics import calculate_total_duration
 
 
 def load_voice_data(pkl_path="/home/mikhail/prj/bird_clef_25/data/train_voice_data.pkl"):
@@ -105,31 +105,6 @@ def remove_voice(audio, file_name, full_path, sr, voice_data):
     return audio
 
 
-def calculate_total_duration(species_dir):
-    """
-    Calculate the total duration of all audio files in a species directory.
-
-    Args:
-        species_dir: Directory containing audio files for a species
-
-    Returns:
-        Total duration in seconds
-    """
-    total_duration = 0
-    audio_files = [f for f in os.listdir(species_dir) if f.endswith('.ogg')]
-
-    for file_name in audio_files:
-        file_path = os.path.join(species_dir, file_name)
-        try:
-            # Get audio duration
-            duration = librosa.get_duration(path=file_path)
-            total_duration += duration
-        except Exception as e:
-            print(f"Error getting duration for {file_path}: {e}")
-
-    return total_duration
-
-
 def create_augmentation_pipeline(background_dir=None):
     """
     Create a pipeline of audio augmentations.
@@ -168,7 +143,8 @@ def create_diverse_augmentations(species_list=None,
                                  min_duration_seconds=60.0,
                                  background_dir=None,
                                  augmentations_per_file=3,
-                                 voice_data_path="/home/mikhail/prj/bird_clef_25/data/train_voice_data.pkl"):
+                                 voice_data_path="/home/mikhail/prj/bird_clef_25/data/train_voice_data.pkl",
+                                 stats_csv=None):
     """
     Create diverse augmentations for species with less than the minimum duration.
     This function creates multiple different augmentations for each file.
@@ -180,7 +156,23 @@ def create_diverse_augmentations(species_list=None,
         background_dir: Optional directory containing background noise files
         augmentations_per_file: Number of different augmentations to create per original file
         voice_data_path: Path to pickle file with voice segments
+        stats_csv: Path to CSV with species statistics. If provided, use it to filter species.
     """
+    # If stats_csv is provided, use it to determine which species need augmentation
+    if stats_csv and os.path.exists(stats_csv):
+        print(f"Using existing statistics from {stats_csv}")
+        stats_df = pd.read_csv(stats_csv)
+
+        # Filter species that need augmentation
+        species_to_augment = stats_df[stats_df['total_duration'] < min_duration_seconds]['species_id'].tolist()
+
+        if species_list is not None:
+            # Intersect with provided species list if given
+            species_to_augment = [s for s in species_to_augment if s in species_list]
+
+        print(f"Found {len(species_to_augment)} species that need augmentation based on statistics")
+        species_list = species_to_augment
+
     # Load voice data
     voice_data = load_voice_data(voice_data_path)
 
@@ -331,18 +323,38 @@ def create_diverse_augmentations(species_list=None,
 if __name__ == "__main__":
     # Set paths
     TRAIN_DIR = "/home/mikhail/prj/bc_25_data/train_audio"
-    BACKGROUND_DIR = None  # Set this to a directory with background noise files if available
+    BACKGROUND_DIR = "/home/mikhail/prj/bc_25_data/train_soundscapes"
     VOICE_DATA_PATH = "/home/mikhail/prj/bird_clef_25/data/train_voice_data.pkl"
+    STATS_CSV = "species_statistics.csv"
+    MIN_DURATION = 2400.0
 
-    # Get all species directories
-    all_classes = [d for d in os.listdir(TRAIN_DIR) if os.path.isdir(os.path.join(TRAIN_DIR, d))]
+    # Check if statistics CSV exists
+    if not os.path.exists(STATS_CSV):
+        print(f"Statistics file {STATS_CSV} not found. Please run statistics.py first.")
+        exit(1)
+
+    # Load existing statistics
+    stats_df = pd.read_csv(STATS_CSV)
+
+    # Print summary statistics
+    print(f"Total number of species: {len(stats_df)}")
+    print(f"Mean total duration across species: {stats_df['total_duration'].mean():.2f} seconds")
+    print(f"Median total duration across species: {stats_df['total_duration'].median():.2f} seconds")
+
+    # Get species that need augmentation (less than minimum duration)
+    species_to_augment = stats_df[stats_df['total_duration'] < MIN_DURATION]['species_id'].tolist()
+    print(f"Found {len(species_to_augment)} species that need augmentation")
 
     # Use the advanced diverse augmentation approach with voice removal
     create_diverse_augmentations(
-        species_list=all_classes,
+        species_list=species_to_augment,  # Only augment species that need it
         train_dir=TRAIN_DIR,
-        min_duration_seconds=60.0,  # 1 minute minimum
+        min_duration_seconds=MIN_DURATION,
         background_dir=BACKGROUND_DIR,
         augmentations_per_file=3,  # Create 3 different augmentations per original file
-        voice_data_path=VOICE_DATA_PATH
+        voice_data_path=VOICE_DATA_PATH,
+        stats_csv=STATS_CSV  # Pass the statistics CSV
     )
+
+    # After augmentation, recalculate statistics to confirm we met our targets
+    print("\nTo verify results, run statistics.py again to generate updated statistics.")
