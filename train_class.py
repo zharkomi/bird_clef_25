@@ -7,9 +7,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from keras.src import regularizers
+from tensorflow.keras import layers, regularizers, optimizers, callbacks
 from sklearn.metrics import classification_report, accuracy_score
-from tensorflow.keras import layers, models, optimizers, callbacks
 
 from cuda import setup_cuda
 from src.utils import custom_loss
@@ -27,34 +26,54 @@ USE_ENSEMBLE = True  # Enable/disable ensemble model creation
 OUTPUT_DIR = "train"
 
 
-def create_model(input_dim=1024, num_classes=206, dropout_rate=0.3):
-    """Create an optimized bird species classification model"""
+def one_cycle_lr(epoch, max_lr=0.005, min_lr=0.0001, total_epochs=30):
+    """One-cycle learning rate schedule for better convergence."""
+    if epoch < total_epochs // 2:
+        return min_lr + (max_lr - min_lr) * (epoch / (total_epochs // 2))
+    else:
+        return max_lr - (max_lr - min_lr) * ((epoch - total_epochs // 2) / (total_epochs // 2))
+
+
+def create_model(input_dim=1024, num_classes=206, dropout_rate=0.4):
+    """Create an optimized bird species classification model with residual connections"""
     inputs = layers.Input(shape=(input_dim,), name='input_embeddings')
 
-    # First block with larger units
-    x = layers.Dense(512, kernel_regularizer=regularizers.l2(0.0005))(inputs)
+    # First block with increased regularization
+    x = layers.Dense(384, kernel_regularizer=regularizers.l2(0.001))(inputs)
+    x = layers.BatchNormalization()(x)
+    x = layers.LeakyReLU(alpha=0.1)(x)
+    x = layers.Dropout(dropout_rate + 0.1)(x)  # Higher dropout in first layer (0.5)
+
+    # Store for residual connection
+    x_prev = x
+
+    # Second block with residual connection
+    x = layers.Dense(256, kernel_regularizer=regularizers.l2(0.001))(x)
     x = layers.BatchNormalization()(x)
     x = layers.LeakyReLU(alpha=0.1)(x)
     x = layers.Dropout(dropout_rate)(x)
 
-    # Second block
-    x = layers.Dense(256, kernel_regularizer=regularizers.l2(0.0005))(x)
+    # Add residual connection with projection
+    x_res = layers.Dense(256)(x_prev)  # Project to match dimensions
+    x = layers.Add()([x, x_res])
+
+    # Third block with residual connection
+    x_prev = x
+    x = layers.Dense(128, kernel_regularizer=regularizers.l2(0.001))(x)
     x = layers.BatchNormalization()(x)
     x = layers.LeakyReLU(alpha=0.1)(x)
     x = layers.Dropout(dropout_rate)(x)
 
-    # Third block
-    x = layers.Dense(128, kernel_regularizer=regularizers.l2(0.0005))(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.LeakyReLU(alpha=0.1)(x)
-    x = layers.Dropout(dropout_rate)(x)
+    # Add another residual connection with projection
+    x_res = layers.Dense(128)(x_prev)  # Project to match dimensions
+    x = layers.Add()([x, x_res])
 
     # Output layer
     outputs = layers.Dense(num_classes, name='species_logits')(x)
 
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
 
-    # One-cycle learning rate schedule
+    # Use gradient clipping with Adam optimizer and learning rate schedule
     lr_schedule = optimizers.schedules.ExponentialDecay(
         initial_learning_rate=0.001,
         decay_steps=1000,
@@ -62,9 +81,14 @@ def create_model(input_dim=1024, num_classes=206, dropout_rate=0.3):
         staircase=True
     )
 
-    # Compile with SparseCategoricalCrossentropy instead of CategoricalCrossentropy
+    optimizer = tf.keras.optimizers.Adam(
+        learning_rate=lr_schedule,
+        clipnorm=1.0  # Add gradient clipping to prevent exploding gradients
+    )
+
+    # Compile with the custom loss function from src.utils
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=lr_schedule),
+        optimizer=optimizer,
         loss=custom_loss,
         metrics=['accuracy', tf.keras.metrics.SparseTopKCategoricalAccuracy(k=3, name='top3_acc')]
     )
@@ -72,33 +96,54 @@ def create_model(input_dim=1024, num_classes=206, dropout_rate=0.3):
     return model
 
 
-# Function to train the model
+# Function to train the model with enhanced callbacks
 def train_model(train_dataset, val_dataset, input_dim, num_classes, fold_num, epochs=30):
-    # Create model
+    # Create optimized model
     model = create_model(input_dim, num_classes)
 
-    # Define callbacks
+    # Define enhanced callbacks
     checkpoint_cb = callbacks.ModelCheckpoint(
         f'{OUTPUT_DIR}/best_species_classifier_fold{fold_num}.keras',
         save_best_only=True,
         monitor='val_accuracy',
         mode='max'
     )
+
+    # Enhanced early stopping with more patience
     early_stopping_cb = callbacks.EarlyStopping(
         monitor='val_accuracy',
-        patience=5,
-        restore_best_weights=True
+        patience=7,  # Increased from 5 to 7
+        restore_best_weights=True,
+        verbose=1
     )
 
-    # Train model
+    # Add learning rate scheduler using one-cycle policy
+    lr_scheduler = callbacks.LearningRateScheduler(one_cycle_lr)
+
+    # Add ReduceLROnPlateau as a backup strategy
+    reduce_lr = callbacks.ReduceLROnPlateau(
+        monitor='val_loss',
+        factor=0.5,
+        patience=3,
+        min_lr=1e-6,
+        verbose=1
+    )
+
+    # Train model with enhanced callbacks
     history = model.fit(
         train_dataset,
         validation_data=val_dataset,
         epochs=epochs,
-        callbacks=[checkpoint_cb, early_stopping_cb]
+        callbacks=[checkpoint_cb, early_stopping_cb, lr_scheduler, reduce_lr]
     )
 
     return model, history
+
+
+# BirdNET-style sigmoid function
+def flat_sigmoid(x, sensitivity=-1.0):
+    """Apply the same custom sigmoid function used by BirdNET"""
+    return 1.0 / (1.0 + np.exp(sensitivity * np.clip(x, -15, 15)))
 
 
 # Function to evaluate the model
@@ -131,12 +176,6 @@ def evaluate_model(model, val_dataset, label_encoder):
     return accuracy, report, pred_species, true_species
 
 
-# BirdNET-style sigmoid function
-def flat_sigmoid(x, sensitivity=-1.0):
-    """Apply the same custom sigmoid function used by BirdNET"""
-    return 1.0 / (1.0 + np.exp(sensitivity * np.clip(x, -15, 15)))
-
-
 # Function to plot training history
 def plot_history(history, fold_num):
     """Plot training and validation metrics for a fold"""
@@ -165,26 +204,26 @@ def plot_history(history, fold_num):
     plt.close()
 
 
+# EnsembleModel class
+class EnsembleModel(tf.keras.Model):
+    def __init__(self, models):
+        super(EnsembleModel, self).__init__()
+        self.models = models
+
+    def call(self, inputs):
+        # Get predictions from each model
+        predictions = [model(inputs) for model in self.models]
+        # Stack and average predictions
+        stacked = tf.stack(predictions, axis=0)
+        return tf.reduce_mean(stacked, axis=0)
+
+
 # Function to create an ensemble model from all fold models
 def create_ensemble_model(fold_models, input_shape, output_dir):
     """
     Create an ensemble model by averaging predictions from multiple fold models.
     Saves the model in a deployment-friendly format.
     """
-
-    # Create a custom ensemble model class
-    class EnsembleModel(tf.keras.Model):
-        def __init__(self, models):
-            super(EnsembleModel, self).__init__()
-            self.models = models
-
-        def call(self, inputs):
-            # Get predictions from each model
-            predictions = [model(inputs) for model in self.models]
-            # Stack and average predictions
-            stacked = tf.stack(predictions, axis=0)
-            return tf.reduce_mean(stacked, axis=0)
-
     # Create ensemble model
     ensemble_model = EnsembleModel(fold_models)
 
@@ -227,7 +266,7 @@ def create_ensemble_model(fold_models, input_shape, output_dir):
     return ensemble_model
 
 
-# NEW: Function to evaluate the ensemble model
+# Function to evaluate the ensemble model
 def evaluate_ensemble_model(ensemble_model, val_datasets, label_encoders, output_dir):
     """
     Evaluate the ensemble model on combined validation data from all folds.
@@ -345,7 +384,7 @@ def train_fold(fold_idx, fold_data, batch_size, epochs, output_dir):
     input_dim = train_embeddings.shape[1]
     num_classes = len(label_encoder.classes_)
 
-    # Create TensorFlow datasets
+    # Create TensorFlow datasets using the function from train_prep
     train_dataset = create_tf_dataset(train_embeddings, train_labels, batch_size, is_training=True)
     val_dataset = create_tf_dataset(val_embeddings, val_labels, batch_size)
 
@@ -419,7 +458,7 @@ def load_trained_fold(fold_idx, train_dir, batch_size):
         with open(fold_file, "rb") as f:
             fold_data = pickle.load(f)
 
-        # Recreate validation dataset
+        # Recreate validation dataset using function from train_prep
         _, _, val_embeddings, val_labels, _ = fold_data
         val_dataset = create_tf_dataset(val_embeddings, val_labels, batch_size)
 
@@ -645,19 +684,24 @@ def main():
     # Show summary of loaded models
     print(f"\nLoaded {len(fold_models)} fold models for ensemble creation")
 
+    # Summarize results across all folds
+    if fold_accuracies:
+        summarize_results(fold_accuracies, all_reports, OUTPUT_DIR)
+        create_final_tflite_model(OUTPUT_DIR)
+
     # Create and evaluate ensemble model if we have multiple folds
-    if len(fold_models) > 1:
-        print("\n===== Creating Ensemble Model =====")
+    if len(fold_models) > 1 and USE_ENSEMBLE:
+        best_fold_acc = max(fold_accuracies) if fold_accuracies else 0.0
         create_and_evaluate_ensemble(
-            fold_models, val_datasets, label_encoders, input_dim, OUTPUT_DIR, 0.0
+            fold_models, val_datasets, label_encoders, input_dim, OUTPUT_DIR, best_fold_acc
         )
-    else:
+    elif len(fold_models) <= 1:
         print("\nERROR: Need at least 2 models to create an ensemble, but found only", len(fold_models))
 
-    print("\nEnsemble creation complete!")
+    print("\nTraining complete!")
 
 
 if __name__ == "__main__":
-    # OUTPUT_DIR = os.path.join('train_' + datetime.now().strftime('%Y%m%d_%H%M%S'))
+    # Create output directory
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     main()
