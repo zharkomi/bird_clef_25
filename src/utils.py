@@ -79,11 +79,16 @@ def denoise_and_play(file_path):
     os.system(f"vlc {file_path} {denoised_file_path}")
 
 
-# At the top of your file, define the custom loss function outside of any other function
 def custom_loss(y_true, y_pred):
-    # Squeeze the labels to remove any extra dimensions
-    y_true_squeezed = tf.squeeze(y_true)
+    # Make sure y_true has shape before squeezing
+    if tf.size(y_true) == 0:
+        return tf.constant(0.0, dtype=y_pred.dtype)
+
+    # Ensure y_true has the right shape
+    y_true = tf.reshape(y_true, [-1])  # Reshape to 1D tensor
+
+    # Now apply sparse softmax cross entropy
     return tf.nn.sparse_softmax_cross_entropy_with_logits(
-        labels=tf.cast(y_true_squeezed, tf.int32),
+        labels=tf.cast(y_true, tf.int32),
         logits=y_pred
     )
